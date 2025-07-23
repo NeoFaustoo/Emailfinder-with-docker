@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  email-scraper-web:
+    build: .
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./results:/app/results
+      - ./data:/app/data  # For persistent data
+    environment:
+      - FLASK_ENV=production
+      - FLASK_APP=app.py
+      - PYTHONPATH=/app
+      - MAX_CONTENT_LENGTH=200000000
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - email-scraper-net
+
+networks:
+  email-scraper-net:
+    driver: bridge
+
+volumes:
+  scraper-data:
+    driver: local
