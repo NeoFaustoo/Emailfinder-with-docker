@@ -54,6 +54,7 @@ data/
 test_*.py
 README_streaming.md
 requirements_streaming.txt
+.ndjson
 
 # Docker
 Dockerfile

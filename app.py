@@ -9,6 +9,7 @@ import json
 import asyncio
 import time
 import uuid
+import aiofiles
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 from pathlib import Path
@@ -20,17 +21,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 import uvicorn
 
-# Import the enhanced email scraper with streaming support
-try:
-    from enhanced_email_scraper import (
-        process_files_streaming, 
-        StreamingEmailProcessor,
-        ProcessingResult
-    )
-    SCRAPER_AVAILABLE = True
-except ImportError as e:
-    print(f"Warning: Enhanced email scraper not available as module: {e}")
-    SCRAPER_AVAILABLE = False
+# Import Kafka producer
+from kafka_producer import get_kafka_producer
+from kafka_config import JOB_STATUS
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -42,7 +35,7 @@ app = FastAPI(
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=["*"],  
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -50,7 +43,6 @@ app.add_middleware(
 
 # Global variables
 active_jobs: Dict[str, Dict[str, Any]] = {}
-streaming_processor: Optional[StreamingEmailProcessor] = None
 
 # Pydantic models
 class JobRequest(BaseModel):
@@ -106,47 +98,27 @@ async def process_files_background(
     file_paths: List[str], 
     config: JobRequest
 ):
-    """Background task for processing files with streaming."""
-    global active_jobs, streaming_processor
+    """Background task for processing files with Kafka workers."""
+    global active_jobs
     
     try:
         # Update job status
-        active_jobs[job_id]["status"] = "running"
+        active_jobs[job_id]["status"] = "submitted"
         active_jobs[job_id]["start_time"] = time.time()
         
-        print(f"🚀 Starting streaming processing for job {job_id}")
+        print(f"🚀 Job {job_id} submitted to Kafka for processing")
         print(f"📁 Files: {len(file_paths)}")
         print(f"⚙️  Config: {config.dict()}")
         
-        # Initialize streaming processor if not exists
-        if streaming_processor is None:
-            streaming_processor = StreamingEmailProcessor(max_workers=config.workers)
-        
-        # Start processing
-        success = await process_files_streaming(
-            input_files=file_paths,
-            workers=config.workers,
-            batch_size=config.batch_size,
-            verbose=config.verbose,
-            job_id=job_id
-        )
-        
-        # Update final status
-        if success:
-            active_jobs[job_id]["status"] = "completed"
-            active_jobs[job_id]["end_time"] = time.time()
-            print(f"✅ Job {job_id} completed successfully")
-        else:
-            active_jobs[job_id]["status"] = "failed"
-            active_jobs[job_id]["errors"].append("Processing failed")
-            print(f"❌ Job {job_id} failed")
+        # Job is now handled by Kafka workers
+        # Status updates will come through Kafka topics
         
     except Exception as e:
-        error_msg = f"Processing error: {str(e)}"
+        error_msg = f"Job submission error: {str(e)}"
         active_jobs[job_id]["status"] = "failed"
         active_jobs[job_id]["errors"].append(error_msg)
         active_jobs[job_id]["end_time"] = time.time()
-        print(f"❌ Job {job_id} failed with error: {e}")
+        print(f"❌ Job {job_id} submission failed with error: {e}")
 
 # API Endpoints
 
@@ -154,21 +126,21 @@ async def process_files_background(
 async def root():
     """API root endpoint."""
     return {
-        "message": "Email Scraper API v2.0",
+        "message": "Email Scraper API v2.0 (Kafka-enabled)",
         "status": "running",
-        "streaming_support": True,
+        "architecture": "async-kafka",
         "endpoints": {
             "upload": "POST /api/upload",
             "jobs": "GET /api/jobs",
             "job_status": "GET /api/jobs/{job_id}",
             "stream_results": "GET /api/stream-results/{job_id}",
+            "websocket": "WS /ws/{job_id}",
             "health": "GET /api/health"
         }
     }
 
 @app.post("/api/upload", response_model=JobResponse)
 async def upload_and_process(
-    background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
     workers: int = 150,
     batch_size: int = 500,
@@ -176,13 +148,7 @@ async def upload_and_process(
     limit: Optional[int] = None,
     max_hours: Optional[float] = None
 ):
-    """Upload files and start streaming processing."""
-    
-    if not SCRAPER_AVAILABLE:
-        raise HTTPException(
-            status_code=503, 
-            detail="Email scraper module not available"
-        )
+    """Upload files and submit job to Kafka for processing."""
     
     if not files:
         raise HTTPException(
@@ -201,19 +167,20 @@ async def upload_and_process(
                 detail=f"Invalid file type: {file.filename}. Supported: .csv, .xlsx, .xls, .ndjson"
             )
         
-        # Save file
+        # Save file asynchronously
         file_path = upload_dir / f"{uuid.uuid4().hex}_{file.filename}"
         try:
-            with open(file_path, "wb") as buffer:
-                shutil.copyfileobj(file.file, buffer)
+            async with aiofiles.open(file_path, "wb") as buffer:
+                content = await file.read()
+                await buffer.write(content)
             valid_files.append(str(file_path))
         except Exception as e:
             raise HTTPException(
                 status_code=500,
                 detail=f"Error saving file {file.filename}: {str(e)}"
             )
-        
-        # Create job
+    
+    # Create job
     job_id = create_job_id()
     config = JobRequest(
         workers=workers,
@@ -223,9 +190,10 @@ async def upload_and_process(
         max_hours=max_hours
     )
     
-    active_jobs[job_id] = {
+    # Prepare job data for Kafka
+    job_data = {
         "job_id": job_id,
-        "status": "pending",
+        "status": JOB_STATUS["PENDING"],
         "progress": 0.0,
         "total_processed": 0,
         "total_emails": 0,
@@ -236,18 +204,39 @@ async def upload_and_process(
         "config": config.dict()
     }
     
-    # Start background processing
-    background_tasks.add_task(
-        process_files_background,
-        job_id,
-        valid_files,
-        config
-    )
+    # Store job in memory (will be replaced by Kafka/Redis later)
+    active_jobs[job_id] = job_data
+    
+    # Send job to Kafka
+    try:
+        producer = await get_kafka_producer()
+        success = await producer.send_job(job_data)
+        
+        if not success:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to submit job to processing queue"
+            )
+        
+        # Send initial status update
+        await producer.send_job_status(job_id, JOB_STATUS["PENDING"])
+        
+    except Exception as e:
+        # Clean up on failure
+        for file_path in valid_files:
+            try:
+                os.remove(file_path)
+            except:
+                pass
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to submit job: {str(e)}"
+        )
     
     return JobResponse(
         job_id=job_id,
-        status="pending",
-        message=f"Processing started for {len(valid_files)} files",
+        status=JOB_STATUS["PENDING"],
+        message=f"Job submitted successfully for {len(valid_files)} files",
         total_files=len(valid_files)
     )
 
@@ -389,8 +378,8 @@ async def health_check():
     return {
         "status": "healthy",
         "timestamp": time.time(),
-        "scraper_available": SCRAPER_AVAILABLE,
-        "active_jobs": len([j for j in active_jobs.values() if j["status"] == "running"])
+        "kafka_enabled": True,
+        "active_jobs": len([j for j in active_jobs.values() if j["status"] in ["running", "submitted"]])
     }
 
 @app.delete("/api/jobs/{job_id}")
@@ -447,8 +436,8 @@ async def download_results(job_id: str):
     }
 
 if __name__ == "__main__":
-    print("🚀 Starting Email Scraper API v2.0")
-    print(f"📦 Scraper module available: {SCRAPER_AVAILABLE}")
+    print("🚀 Starting Email Scraper API v2.0 (Kafka-enabled)")
+    print("📦 Kafka-based async processing enabled")
     print("🌐 API will be available at: http://localhost:8000")
     print("📚 API documentation at: http://localhost:8000/docs")
     
