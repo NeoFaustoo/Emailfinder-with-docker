@@ -1,21 +1,57 @@
+version: '3.8'
 
 services:
-  email-scraper-web:
-    build: .
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
     ports:
-      - "5000:5000"
+      - "2181:2181"
+
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    depends_on: [zookeeper]
+    environment:
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+    ports:
+      - "9092:9092"
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    depends_on: [kafka]
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  email-scraper-api:
+    build: .
+    image: email-scraper-api:latest
+    ports:
+      - "8000:8000"
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - kafka
+      - redis
     volumes:
       - ./uploads:/app/uploads
-      - ./results:/app/results
-      - ./data:/app/data  # For persistent data
-    environment:
-      - FLASK_ENV=production
-      - FLASK_APP=app.py
-      - PYTHONPATH=/app
-      - MAX_CONTENT_LENGTH=500000000
+      - ./data:/app/data
+      - ./backups:/app/backups
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -26,7 +62,3 @@ services:
 networks:
   email-scraper-net:
     driver: bridge
-
-volumes:
-  scraper-data:
-    driver: local

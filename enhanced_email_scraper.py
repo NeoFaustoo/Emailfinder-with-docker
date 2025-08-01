@@ -14,6 +14,10 @@ import argparse
 import glob
 import random
 import time
+import asyncio
+import aiofiles
+import uuid
+import shutil
 from datetime import datetime
 from typing import List, Tuple, Dict, Optional, Set
 import concurrent.futures
@@ -29,6 +33,7 @@ import logging
 import xml.etree.ElementTree as ET
 import hashlib
 import unicodedata
+from dataclasses import dataclass, asdict
 
 # Import required libraries
 import requests
@@ -39,6 +44,16 @@ import warnings
 # Suppress all warnings for clean output
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 warnings.filterwarnings('ignore')
+
+# Add psutil for memory monitoring
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    print("WARNING: psutil not installed. Memory monitoring will be disabled.")
+    print("Install with: pip install psutil")
+    PSUTIL_AVAILABLE = False
+    psutil = None
 
 # Add pandas for Excel/CSV support
 try:
@@ -205,6 +220,513 @@ class HTTPSessionManager:
 
 # Global session manager
 session_manager = HTTPSessionManager()
+
+@dataclass
+class ProcessingResult:
+    """Data class for processing results with streaming support"""
+    name: str
+    domain: Optional[str]
+    website: Optional[str]
+    city: str = ""
+    industry: str = ""
+    emails_found: List[str] = None
+    discovery_method: str = ""
+    success: bool = False
+    pages_accessed: List[str] = None
+    processing_time: float = 0.0
+    timestamp: float = 0.0
+    
+    def __post_init__(self):
+        if self.emails_found is None:
+            self.emails_found = []
+        if self.pages_accessed is None:
+            self.pages_accessed = []
+        if self.timestamp == 0.0:
+            self.timestamp = time.time()
+
+class MemoryEfficientBatchProcessor:
+    """Handles large file processing with memory management for streaming"""
+    
+    def __init__(self, batch_size=500, max_memory_mb=1024):
+        self.batch_size = batch_size
+        self.max_memory_mb = max_memory_mb
+        self.current_memory_usage = 0
+        
+    def _get_memory_usage(self) -> float:
+        """Get current memory usage in MB"""
+        if PSUTIL_AVAILABLE:
+            process = psutil.Process()
+            return process.memory_info().rss / 1024 / 1024
+        return 0.0
+    
+    async def stream_ndjson_file(self, file_path: str):
+        """Stream NDJSON file in chunks"""
+        chunk = []
+        
+        async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
+            async for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        company = json.loads(line)
+                        chunk.append(company)
+                        
+                        if len(chunk) >= self.batch_size:
+                            yield chunk
+                            chunk = []
+                            
+                            # Check memory usage
+                            if self._get_memory_usage() > self.max_memory_mb:
+                                import gc
+                                gc.collect()
+                                await asyncio.sleep(0.1)
+                                
+                    except json.JSONDecodeError:
+                        continue
+            
+            # Yield remaining chunk
+            if chunk:
+                yield chunk
+    
+    async def stream_excel_file(self, file_path: str):
+        """Stream Excel file in chunks"""
+        if not PANDAS_AVAILABLE:
+            yield []
+            return
+            
+        try:
+            # Read Excel in chunks
+            chunk_iter = pd.read_excel(file_path, chunksize=self.batch_size)
+            
+            for chunk_df in chunk_iter:
+                # Convert chunk to list of dicts
+                chunk_data = chunk_df.to_dict('records')
+                yield chunk_data
+                
+                # Check memory usage
+                if self._get_memory_usage() > self.max_memory_mb:
+                    import gc
+                    gc.collect()
+                    await asyncio.sleep(0.1)
+                    
+        except Exception as e:
+            logging.error(f"Error streaming Excel file: {e}")
+            yield []
+    
+    async def stream_csv_file(self, file_path: str):
+        """Stream CSV file in chunks"""
+        if not PANDAS_AVAILABLE:
+            yield []
+            return
+            
+        try:
+            # Read CSV in chunks
+            chunk_iter = pd.read_csv(file_path, chunksize=self.batch_size)
+            
+            for chunk_df in chunk_iter:
+                # Convert chunk to list of dicts
+                chunk_data = chunk_df.to_dict('records')
+                yield chunk_data
+                
+                # Check memory usage
+                if self._get_memory_usage() > self.max_memory_mb:
+                    import gc
+                    gc.collect()
+                    await asyncio.sleep(0.1)
+                    
+        except Exception as e:
+            logging.error(f"Error streaming CSV file: {e}")
+            yield []
+
+class FileResultWriter:
+    """Handles writing results back to input files with automatic backups"""
+    
+    def __init__(self):
+        self.backup_dir = "backups"
+        os.makedirs(self.backup_dir, exist_ok=True)
+    
+    def backup_original_file(self, file_path: str) -> str:
+        """Create backup of original file"""
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = os.path.basename(file_path)
+        name, ext = os.path.splitext(filename)
+        backup_path = os.path.join(self.backup_dir, f"{name}_backup_{timestamp}{ext}")
+        
+        shutil.copy2(file_path, backup_path)
+        logging.info(f"Backup created: {backup_path}")
+        
+        return backup_path
+    
+    def update_ndjson_file(self, file_path: str, results: List[ProcessingResult]) -> bool:
+        """Update NDJSON file with results"""
+        try:
+            # Create backup
+            self.backup_original_file(file_path)
+            
+            # Read original data
+            original_data = []
+            with open(file_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        original_data.append(json.loads(line))
+            
+            # Create results lookup
+            results_lookup = {result.name: result for result in results}
+            
+            # Update data with results
+            updated_data = []
+            for company in original_data:
+                name = company.get('name') or company.get('company_name') or company.get('raw_name', '')
+                
+                if name in results_lookup:
+                    result = results_lookup[name]
+                    # Add email results to company data
+                    company['emails_found'] = result.emails_found
+                    company['email_count'] = len(result.emails_found)
+                    company['discovery_method'] = result.discovery_method
+                    company['success'] = result.success
+                    company['pages_accessed'] = result.pages_accessed
+                    company['processing_time'] = result.processing_time
+                    company['processed_at'] = datetime.now().isoformat()
+                
+                updated_data.append(company)
+            
+            # Write updated data
+            with open(file_path, 'w', encoding='utf-8') as f:
+                for company in updated_data:
+                    f.write(json.dumps(company, ensure_ascii=False) + '\n')
+            
+            logging.info(f"Updated NDJSON file: {file_path}")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Error updating NDJSON file: {e}")
+            return False
+    
+    def update_excel_file(self, file_path: str, results: List[ProcessingResult]) -> bool:
+        """Update Excel file with results"""
+        if not PANDAS_AVAILABLE:
+            logging.error("pandas not available for Excel updates")
+            return False
+            
+        try:
+            # Create backup
+            self.backup_original_file(file_path)
+            
+            # Read original data
+            df = pd.read_excel(file_path)
+            
+            # Create results lookup
+            results_lookup = {result.name: result for result in results}
+            
+            # Add new columns
+            df['emails_found'] = ''
+            df['email_count'] = 0
+            df['discovery_method'] = ''
+            df['success'] = False
+            df['pages_accessed'] = ''
+            df['processing_time'] = 0.0
+            df['processed_at'] = ''
+            
+            # Update with results
+            for idx, row in df.iterrows():
+                name = row.get('name') or row.get('company_name') or row.get('raw_name', '')
+                
+                if name in results_lookup:
+                    result = results_lookup[name]
+                    df.at[idx, 'emails_found'] = ', '.join(result.emails_found)
+                    df.at[idx, 'email_count'] = len(result.emails_found)
+                    df.at[idx, 'discovery_method'] = result.discovery_method
+                    df.at[idx, 'success'] = result.success
+                    df.at[idx, 'pages_accessed'] = '; '.join(result.pages_accessed)
+                    df.at[idx, 'processing_time'] = result.processing_time
+                    df.at[idx, 'processed_at'] = datetime.now().isoformat()
+            
+            # Write updated data
+            df.to_excel(file_path, index=False)
+            
+            logging.info(f"Updated Excel file: {file_path}")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Error updating Excel file: {e}")
+            return False
+    
+    def update_csv_file(self, file_path: str, results: List[ProcessingResult]) -> bool:
+        """Update CSV file with results"""
+        if not PANDAS_AVAILABLE:
+            logging.error("pandas not available for CSV updates")
+            return False
+            
+        try:
+            # Create backup
+            self.backup_original_file(file_path)
+            
+            # Read original data
+            df = pd.read_csv(file_path)
+            
+            # Create results lookup
+            results_lookup = {result.name: result for result in results}
+            
+            # Add new columns
+            df['emails_found'] = ''
+            df['email_count'] = 0
+            df['discovery_method'] = ''
+            df['success'] = False
+            df['pages_accessed'] = ''
+            df['processing_time'] = 0.0
+            df['processed_at'] = ''
+            
+            # Update with results
+            for idx, row in df.iterrows():
+                name = row.get('name') or row.get('company_name') or row.get('raw_name', '')
+                
+                if name in results_lookup:
+                    result = results_lookup[name]
+                    df.at[idx, 'emails_found'] = ', '.join(result.emails_found)
+                    df.at[idx, 'email_count'] = len(result.emails_found)
+                    df.at[idx, 'discovery_method'] = result.discovery_method
+                    df.at[idx, 'success'] = result.success
+                    df.at[idx, 'pages_accessed'] = '; '.join(result.pages_accessed)
+                    df.at[idx, 'processing_time'] = result.processing_time
+                    df.at[idx, 'processed_at'] = datetime.now().isoformat()
+            
+            # Write updated data
+            df.to_csv(file_path, index=False)
+            
+            logging.info(f"Updated CSV file: {file_path}")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Error updating CSV file: {e}")
+            return False
+    
+    def update_file_with_results(self, file_path: str, results: List[ProcessingResult]) -> bool:
+        """Update file with results based on file type"""
+        file_ext = os.path.splitext(file_path)[1].lower()
+        
+        if file_ext == '.ndjson':
+            return self.update_ndjson_file(file_path, results)
+        elif file_ext in ['.xlsx', '.xls']:
+            return self.update_excel_file(file_path, results)
+        elif file_ext == '.csv':
+            return self.update_csv_file(file_path, results)
+        else:
+            logging.error(f"Unsupported file type: {file_ext}")
+            return False
+
+class StreamingEmailProcessor:
+    """Main streaming email processor with web app integration"""
+    
+    def __init__(self, max_workers=150):
+        self.max_workers = max_workers
+        self.active_jobs: Dict[str, 'JobManager'] = {}
+        self.result_queue = asyncio.Queue()
+        self.batch_processor = MemoryEfficientBatchProcessor()
+        self.file_writer = FileResultWriter()
+        
+    async def start_streaming_processor(self, job_id: str, input_files: List[str]) -> str:
+        """Initialize streaming processor for a job"""
+        job_manager = JobManager(job_id, input_files, self.max_workers, self)
+        self.active_jobs[job_id] = job_manager
+        
+        # Start background processing
+        asyncio.create_task(self._process_job_streaming(job_id))
+        
+        logging.info(f"Started streaming processor for job {job_id}")
+        return job_id
+    
+    async def _process_job_streaming(self, job_id: str):
+        """Process job with streaming results"""
+        job_manager = self.active_jobs[job_id]
+        
+        try:
+            # Process each file
+            for file_path in job_manager.input_files:
+                await self._process_file_streaming(file_path, job_id)
+            
+            # Mark job as complete
+            job_manager.status = 'completed'
+            job_manager.completed_at = time.time()
+            
+            # Send completion message
+            await self.result_queue.put({
+                'job_id': job_id,
+                'type': 'job_completed',
+                'total_processed': job_manager.total_processed,
+                'total_successes': job_manager.total_successes,
+                'total_emails': job_manager.total_emails,
+                'timestamp': time.time()
+            })
+            
+        except Exception as e:
+            logging.error(f"Error processing job {job_id}: {e}")
+            job_manager.status = 'error'
+            job_manager.error_message = str(e)
+    
+    async def _process_file_streaming(self, file_path: str, job_id: str):
+        """Process single file with streaming"""
+        job_manager = self.active_jobs[job_id]
+        file_ext = os.path.splitext(file_path)[1].lower()
+        
+        # Determine streamer based on file type
+        if file_ext == '.ndjson':
+            streamer = self.batch_processor.stream_ndjson_file(file_path)
+        elif file_ext in ['.xlsx', '.xls']:
+            streamer = self.batch_processor.stream_excel_file(file_path)
+        elif file_ext == '.csv':
+            streamer = self.batch_processor.stream_csv_file(file_path)
+        else:
+            logging.error(f"Unsupported file type: {file_ext}")
+            return
+        
+        # Process batches
+        file_results = []
+        async for batch in streamer:
+            # Process batch with workers
+            batch_results = await self._process_batch_with_workers(batch, job_id)
+            file_results.extend(batch_results)
+            
+            # Update job statistics
+            job_manager.total_processed += len(batch_results)
+            job_manager.total_successes += len([r for r in batch_results if r.success])
+            job_manager.total_emails += sum(len(r.emails_found) for r in batch_results)
+            
+            # Send batch results
+            await self.result_queue.put({
+                'job_id': job_id,
+                'type': 'batch_complete',
+                'batch_size': len(batch_results),
+                'batch_successes': len([r for r in batch_results if r.success]),
+                'batch_emails': sum(len(r.emails_found) for r in batch_results),
+                'timestamp': time.time()
+            })
+        
+        # Update file with results
+        if file_results:
+            success = self.file_writer.update_file_with_results(file_path, file_results)
+            if success:
+                await self.result_queue.put({
+                    'job_id': job_id,
+                    'type': 'file_updated',
+                    'file_path': file_path,
+                    'results_count': len(file_results),
+                    'timestamp': time.time()
+                })
+    
+    async def _process_batch_with_workers(self, batch: List[dict], job_id: str) -> List[ProcessingResult]:
+        """Process batch using thread pool with high worker count"""
+        loop = asyncio.get_event_loop()
+        
+        # Use ThreadPoolExecutor for CPU-bound tasks
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # Submit all tasks
+            future_to_company = {
+                loop.run_in_executor(executor, self._process_single_company, company): company 
+                for company in batch
+            }
+            
+            # Collect results as they complete
+            results = []
+            for future in asyncio.as_completed(future_to_company):
+                try:
+                    result = await future
+                    results.append(result)
+                    
+                    # Send individual result immediately
+                    await self.result_queue.put({
+                        'job_id': job_id,
+                        'type': 'company_result',
+                        'result': asdict(result),
+                        'timestamp': time.time()
+                    })
+                except Exception as e:
+                    logging.error(f"Error processing company: {e}")
+        
+        return results
+    
+    def _process_single_company(self, company_data: dict) -> ProcessingResult:
+        """Process single company with optimized session"""
+        start_time = time.time()
+        
+        # Extract company data
+        name = company_data.get('name') or company_data.get('company_name') or company_data.get('raw_name', '')
+        website = company_data.get('website') or company_data.get('domain') or company_data.get('url', '')
+        city = company_data.get('city') or company_data.get('ville', '')
+        industry = company_data.get('industry') or company_data.get('secteur', '')
+        
+        # Clean domain
+        domain = clean_url(website) if website else None
+        
+        # Process company
+        if domain:
+            emails, method, pages_accessed, stats = discover_emails_for_domain(domain)
+            
+            result = ProcessingResult(
+                name=name,
+                domain=domain,
+                website=website,
+                city=city,
+                industry=industry,
+                emails_found=emails,
+                discovery_method=method,
+                success=len(emails) > 0,
+                pages_accessed=pages_accessed,
+                processing_time=time.time() - start_time
+            )
+        else:
+            result = ProcessingResult(
+                name=name,
+                domain=None,
+                website=website,
+                city=city,
+                industry=industry,
+                emails_found=[],
+                discovery_method='no_domain',
+                success=False,
+                pages_accessed=[],
+                processing_time=time.time() - start_time
+            )
+        
+        return result
+    
+    def get_job_status(self, job_id: str) -> Optional[dict]:
+        """Get status of a specific job"""
+        if job_id not in self.active_jobs:
+            return None
+        
+        job_manager = self.active_jobs[job_id]
+        return {
+            'job_id': job_id,
+            'status': job_manager.status,
+            'total_processed': job_manager.total_processed,
+            'total_successes': job_manager.total_successes,
+            'total_emails': job_manager.total_emails,
+            'started_at': job_manager.started_at,
+            'completed_at': job_manager.completed_at,
+            'error_message': job_manager.error_message
+        }
+    
+    def get_all_jobs_status(self) -> List[dict]:
+        """Get status of all active jobs"""
+        return [self.get_job_status(job_id) for job_id in self.active_jobs.keys()]
+
+class JobManager:
+    """Manages individual job processing"""
+    
+    def __init__(self, job_id: str, input_files: List[str], max_workers: int, processor: StreamingEmailProcessor):
+        self.job_id = job_id
+        self.input_files = input_files
+        self.max_workers = max_workers
+        self.processor = processor
+        self.status = 'running'
+        self.started_at = time.time()
+        self.completed_at = None
+        self.error_message = None
+        self.total_processed = 0
+        self.total_successes = 0
+        self.total_emails = 0
 
 class PerformanceMonitor:
     """Enhanced performance monitoring with detailed analytics."""
@@ -1865,6 +2387,111 @@ def process_files(input_files, output_dir="results", workers=150, verbose=False,
     print(f"📄 All results saved in: {output_dir}/")
 
 
+async def process_files_streaming(input_files, workers=150, batch_size=500, verbose=False, progress_callback=None, job_id=None):
+    """Process files using streaming processor with direct file updates"""
+    
+    # Validate files
+    valid_files = []
+    for file_path in input_files:
+        if os.path.exists(file_path):
+            valid_files.append(file_path)
+        else:
+            print(f"⚠️  Warning: File not found: {file_path}")
+    
+    if not valid_files:
+        print("❌ Error: No valid input files found")
+        return False
+    
+    print(f"🚀 Streaming Email Processor")
+    print(f"=" * 60)
+    print(f"📂 Input files: {len(valid_files)}")
+    print(f"⚡ Workers: {workers}")
+    print(f"📦 Batch size: {batch_size}")
+    print(f"🔍 Verbose: {'✅ ENABLED' if verbose else '❌ DISABLED'}")
+    print(f"=" * 60)
+    
+    # Initialize processor
+    streaming_processor = StreamingEmailProcessor(max_workers=workers)
+    streaming_processor.batch_processor.batch_size = batch_size
+    
+    # Generate job ID if not provided
+    if not job_id:
+        job_id = f"streaming_{int(time.time())}"
+    
+    try:
+        # Start processing
+        await streaming_processor.start_streaming_processor(job_id, valid_files)
+        
+        # Monitor progress
+        print(f"📊 Monitoring progress for job: {job_id}")
+        start_time = time.time()
+        
+        while True:
+            # Get job status
+            status = streaming_processor.get_job_status(job_id)
+            if not status:
+                print("❌ Job not found")
+                break
+            
+            elapsed = time.time() - start_time
+            
+            # Calculate progress metrics
+            if status['total_processed'] > 0:
+                rate = status['total_processed'] / elapsed * 60  # per minute
+                success_rate = status['total_successes'] / status['total_processed'] * 100
+            else:
+                rate = 0
+                success_rate = 0
+            
+            # Display progress
+            print(f"\r⏱️  Elapsed: {elapsed:.1f}s | "
+                  f"Processed: {status['total_processed']} | "
+                  f"Successes: {status['total_successes']} ({success_rate:.1f}%) | "
+                  f"Emails: {status['total_emails']} | "
+                  f"Rate: {rate:.1f}/min | "
+                  f"Status: {status['status']}", end="", flush=True)
+            
+            # Call progress callback if provided
+            if progress_callback:
+                progress_callback(status['total_processed'], status['total_successes'], status['total_emails'])
+            
+            # Check if completed
+            if status['status'] in ['completed', 'error']:
+                print()  # New line after progress
+                break
+            
+            await asyncio.sleep(2)  # Update every 2 seconds
+        
+        # Final status
+        final_status = streaming_processor.get_job_status(job_id)
+        if final_status:
+            total_time = time.time() - start_time
+            print(f"\n🎉 Processing completed!")
+            print(f"📊 Final results:")
+            print(f"   Total processed: {final_status['total_processed']}")
+            print(f"   Total successes: {final_status['total_successes']}")
+            print(f"   Total emails: {final_status['total_emails']}")
+            print(f"   Processing time: {total_time:.1f}s")
+            print(f"   Average rate: {final_status['total_processed']/total_time*60:.1f} companies/minute")
+            
+            if final_status['status'] == 'error':
+                print(f"   Error: {final_status.get('error_message', 'Unknown error')}")
+                return False
+        
+        # Clean up job
+        if job_id in streaming_processor.active_jobs:
+            del streaming_processor.active_jobs[job_id]
+        
+        print(f"\n✅ Streaming processing completed successfully!")
+        return True
+        
+    except Exception as e:
+        print(f"\n❌ Streaming processing failed: {e}")
+        if verbose:
+            import traceback
+            traceback.print_exc()
+        return False
+
 def process_files_with_callback(input_files, output_dir="results", workers=150, verbose=False, resume=False, limit=None, max_hours=None, monitor=False, progress_callback=None, job_id=None):
     """Enhanced file processing with web interface progress callback."""
     start_time = time.time()
@@ -2262,9 +2889,9 @@ def generate_final_report(all_results, output_dir, total_processed_count, total_
         print(f"⚠️  Processing completed but report generation failed")
 
 def main():
-    """Enhanced main function with comprehensive argument parsing."""
+    """Enhanced main function with comprehensive argument parsing and streaming support."""
     parser = argparse.ArgumentParser(
-        description='Enhanced Email Discovery Script - Optimized for Speed and Accuracy',
+        description='Enhanced Email Discovery Script - Optimized for Speed and Accuracy with Streaming Support',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 🚀 ENHANCED FEATURES:
@@ -2274,16 +2901,26 @@ def main():
   • Session pooling and connection reuse
   • Smart timeout and retry strategies
   • Enhanced monitoring and analytics
+  • Streaming processing with direct file updates
+  • Memory-efficient batch processing
 
 📋 EXAMPLES:
-  python enhanced_email_finder.py companies.ndjson --workers 200 --verbose
-  python enhanced_email_finder.py companies.xlsx --workers 150 --monitor
-  python enhanced_email_finder.py *.csv --resume --workers 180 --verbose
-  python enhanced_email_finder.py companies.ndjson --limit 100 --monitor
-  python enhanced_email_finder.py companies.xlsx --max-hours 2 --workers 200
+  # Standard processing
+  python enhanced_email_scraper.py companies.ndjson --workers 200 --verbose
+  python enhanced_email_scraper.py companies.xlsx --workers 150 --monitor
+  
+  # Streaming processing (NEW)
+  python enhanced_email_scraper.py companies.ndjson --streaming --workers 150
+  python enhanced_email_scraper.py *.xlsx --streaming --workers 200 --batch-size 1000
+  
+  # Resume and other options
+  python enhanced_email_scraper.py *.csv --resume --workers 180 --verbose
+  python enhanced_email_scraper.py companies.ndjson --limit 100 --monitor
+  python enhanced_email_scraper.py companies.xlsx --max-hours 2 --workers 200
 
 📂 SUPPORTED FORMATS: .ndjson, .xlsx, .xls, .csv
 💾 AUTO-SAVE: Progress saved every 300 companies for resume
+💾 STREAMING: Direct file updates with automatic backups
 🔍 TESTING: Use --limit for smaller test runs
 📊 MONITORING: Use --monitor for detailed performance analytics
         """
@@ -2297,6 +2934,8 @@ def main():
     parser.add_argument('--limit', '-l', type=int, help='Limit number of companies for testing')
     parser.add_argument('--max-hours', type=float, help='Maximum runtime in hours')
     parser.add_argument('--monitor', action='store_true', help='Enable comprehensive performance monitoring')
+    parser.add_argument('--streaming', '-s', action='store_true', help='Enable streaming processing with direct file updates')
+    parser.add_argument('--batch-size', '-b', type=int, default=500, help='Batch size for streaming processing (default: 500)')
     
     args = parser.parse_args()
     
@@ -2330,11 +2969,14 @@ def main():
     print(f"🔄 Resume mode: {'✅ ENABLED' if args.resume else '❌ DISABLED'}")
     print(f"🔍 Verbose mode: {'✅ ENABLED' if args.verbose else '❌ DISABLED'}")
     print(f"📊 Monitor mode: {'✅ ENABLED' if args.monitor else '❌ DISABLED'}")
+    print(f"🌊 Streaming mode: {'✅ ENABLED' if args.streaming else '❌ DISABLED'}")
     
     if args.limit:
         print(f"🧪 Test mode: LIMIT {args.limit} companies")
     if args.max_hours:
         print(f"⏰ Max runtime: {args.max_hours} hours")
+    if args.streaming:
+        print(f"📦 Batch size: {args.batch_size} companies")
         
     print(f"=" * 60)
     
@@ -2342,20 +2984,40 @@ def main():
         # Initialize global session manager
         print(f"🔧 Initializing HTTP session pool...")
         
-        # Start processing
-        process_files(
-            input_files=valid_files,
-            output_dir=args.output,
-            workers=args.workers,
-            verbose=args.verbose,
-            resume=args.resume,
-            limit=args.limit,
-            max_hours=args.max_hours,
-            monitor=args.monitor
-        )
-        
-        print(f"\n🎉 Enhanced email discovery completed successfully!")
-        return 0
+        # Choose processing mode
+        if args.streaming:
+            # Streaming processing with direct file updates
+            print(f"🌊 Starting streaming processing...")
+            success = asyncio.run(process_files_streaming(
+                input_files=valid_files,
+                workers=args.workers,
+                batch_size=args.batch_size,
+                verbose=args.verbose
+            ))
+            
+            if success:
+                print(f"\n🎉 Streaming email discovery completed successfully!")
+                print(f"💾 Results written directly to input files with backups in 'backups/' directory")
+                return 0
+            else:
+                print(f"\n❌ Streaming processing failed!")
+                return 1
+        else:
+            # Standard processing
+            print(f"📊 Starting standard processing...")
+            process_files(
+                input_files=valid_files,
+                output_dir=args.output,
+                workers=args.workers,
+                verbose=args.verbose,
+                resume=args.resume,
+                limit=args.limit,
+                max_hours=args.max_hours,
+                monitor=args.monitor
+            )
+            
+            print(f"\n🎉 Enhanced email discovery completed successfully!")
+            return 0
         
     except KeyboardInterrupt:
         print(f"\n⏹️  Script interrupted by user")

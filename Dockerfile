@@ -1,4 +1,4 @@
-# Email Scraper Web App Container
+# Email Scraper API Container
 FROM python:3.11-slim
 
 # Set working directory
@@ -26,22 +26,22 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY . .
 
 # Create necessary directories
-RUN mkdir -p uploads results templates static
+RUN mkdir -p uploads data backups
 
 # Set permissions
 RUN chmod +x *.py
-RUN chmod +x *.sh
-# Expose port
-EXPOSE 5000
+
+# Expose port (FastAPI default)
+EXPOSE 8000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:5000/ || exit 1
+    CMD curl -f http://localhost:8000/api/health || exit 1
 
 # Set environment variables
-ENV FLASK_APP=app.py
-ENV FLASK_ENV=production
 ENV PYTHONPATH=/app
+ENV HOST=0.0.0.0
+ENV PORT=8000
 
-# Run the application
-CMD ["python", "app.py"]
+# Run the application with uvicorn
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
