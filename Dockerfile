@@ -30,7 +30,7 @@ RUN mkdir -p uploads results templates static
 
 # Set permissions
 RUN chmod +x *.py
-
+RUN chmod +x *.sh
 # Expose port
 EXPOSE 5000
 

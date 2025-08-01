@@ -28,7 +28,7 @@ except ImportError:
 # Import the enhanced email scraper
 try:
     # Try to import from the same directory
-    from enhanced_email_scraper import process_files, convert_file_to_ndjson
+    from enhanced_email_scraper import process_files, convert_file_to_ndjson, process_files_with_callback
     SCRAPER_AVAILABLE = True
 except ImportError:
     print("Warning: Enhanced email scraper not available as module")
@@ -36,59 +36,60 @@ except ImportError:
 
 app = Flask(__name__)
 app.secret_key = 'email-scraper-secret-key-2024'
-app.config['MAX_CONTENT_LENGTH'] = 300 * 1024 * 1024  # 50MB max file size
+app.config['MAX_CONTENT_LENGTH'] = 300 * 1024 * 1024  
 
 # Global variables for job tracking
 active_jobs = {}
 job_counter = 0
 
 class JobManager:
-    """Manages scraping jobs with status tracking."""
-    
     def __init__(self):
         self.jobs = {}
-        self.counter = 0
-    
-    def create_job(self, filename, total_companies, config):
-        """Create a new scraping job."""
-        self.counter += 1
-        job_id = f"job_{self.counter}_{int(time.time())}"
-        
+        self.data_file = 'data/jobs.json'
+        self.load_jobs()
+
+    def load_jobs(self):
+        if os.path.exists(self.data_file):
+            with open(self.data_file, 'r') as f:
+                self.jobs = json.load(f)
+        else:
+            self.jobs = {}
+
+    def save_jobs(self):
+        with open(self.data_file, 'w') as f:
+            json.dump(self.jobs, f, indent=4)
+
+    def add_job(self, job_id, filepath, config):
         self.jobs[job_id] = {
-            'id': job_id,
-            'filename': filename,
-            'total_companies': total_companies,
-            'processed': 0,
-            'emails_found': 0,
+            'job_id': job_id,
             'status': 'pending',
             'progress': 0,
-            'config': config,
-            'start_time': time.time(),
-            'output_dir': f"results_{job_id}",
             'errors': [],
-            'results_ready': False,
-            'result_files': []
+            'logs': [],
+            'results': None,
+            'filepath': filepath,
+            'config': config
         }
-        
-        return job_id
-    
-    def update_job(self, job_id, **kwargs):
-        """Update job status."""
+        self.save_jobs()
+
+    def update_job(self, job_id, status=None, progress=None, errors=None, results=None, logs=None):
         if job_id in self.jobs:
-            self.jobs[job_id].update(kwargs)
-    
-    def get_job(self, job_id):
-        """Get job information."""
-        return self.jobs.get(job_id)
-    
-    def get_all_jobs(self):
-        """Get all jobs."""
-        return list(self.jobs.values())
+            if status is not None:
+                self.jobs[job_id]['status'] = status
+            if progress is not None:
+                self.jobs[job_id]['progress'] = progress
+            if errors is not None:
+                self.jobs[job_id]['errors'].extend(errors)
+            if results is not None:
+                self.jobs[job_id]['results'] = results
+            if logs is not None:
+                self.jobs[job_id]['logs'].extend(logs)
+            self.save_jobs()
 
 job_manager = JobManager()
 
 def run_scraper_process(job_id, input_file, config):
-    """Run the email scraper in a separate process."""
+    """Run the email scraper with real-time progress monitoring."""
     try:
         job = job_manager.get_job(job_id)
         if not job:
@@ -101,53 +102,113 @@ def run_scraper_process(job_id, input_file, config):
         os.makedirs(output_dir, exist_ok=True)
         
         # Prepare arguments
-        workers = config.get('workers', 100)
+        workers = min(config.get('workers', 100), 50)
         verbose = config.get('verbose', False)
         limit = config.get('limit')
         max_hours = config.get('max_hours')
         monitor = config.get('monitor', False)
         
-        # Mock processing for demonstration (replace with actual scraper call)
         if SCRAPER_AVAILABLE:
             try:
-                process_files(
-                    input_files=[input_file],
-                    output_dir=output_dir,
-                    workers=workers,
-                    verbose=verbose,
-                    resume=False,
-                    limit=limit,
-                    max_hours=max_hours,
-                    monitor=monitor
-                )
+                print(f"Starting real scraper for job {job_id} with {workers} workers")
                 
-                # Find result files
+                # Start scraper in background thread
+                scraper_thread = threading.Thread(
+                    target=lambda: process_files(
+                        input_files=[input_file],
+                        output_dir=output_dir,
+                        workers=workers,
+                        verbose=verbose,
+                        resume=False,
+                        limit=limit,
+                        max_hours=max_hours,
+                        monitor=monitor
+                    )
+                )
+                scraper_thread.daemon = True
+                scraper_thread.start()
+                
+                # Real-time monitoring by checking progress files
+                total_companies = job['total_companies']
+                last_processed = 0
+                emails_found = 0
+                
+                while scraper_thread.is_alive():
+                    time.sleep(3)  # Check every 3 seconds
+                    
+                    # Look for progress files
+                    if os.path.exists(output_dir):
+                        progress_files = [f for f in os.listdir(output_dir) if f.startswith('progress_batch_')]
+                        
+                        if progress_files:
+                            # Get latest progress file
+                            latest_progress = max(progress_files, key=lambda x: os.path.getctime(os.path.join(output_dir, x)))
+                            progress_path = os.path.join(output_dir, latest_progress)
+                            
+                            try:
+                                with open(progress_path, 'r', encoding='utf-8') as f:
+                                    reader = csv.DictReader(f)
+                                    processed = 0
+                                    current_emails = 0
+                                    
+                                    for row in reader:
+                                        processed += 1
+                                        if row.get('emails_found'):
+                                            emails_in_row = len([e.strip() for e in row['emails_found'].split(',') if e.strip()])
+                                            current_emails += emails_in_row
+                                    
+                                    if processed > last_processed:
+                                        progress_pct = min(int((processed / total_companies) * 100), 99) if total_companies > 0 else 0
+                                        
+                                        job_manager.update_job(
+                                            job_id,
+                                            progress=progress_pct,
+                                            processed=processed,
+                                            emails_found=current_emails
+                                        )
+                                        
+                                        print(f"Real-time update: {processed}/{total_companies} ({progress_pct}%) - {current_emails} emails")
+                                        last_processed = processed
+                                        emails_found = current_emails
+                            except Exception as e:
+                                print(f"Error reading progress: {e}")
+                
+                # Wait for completion
+                scraper_thread.join()
+                
+                # Find final result files
                 result_files = []
-                for file in os.listdir(output_dir):
-                    if file.endswith('.csv') or file.endswith('.txt') or file.endswith('.json'):
-                        result_files.append(os.path.join(output_dir, file))
+                if os.path.exists(output_dir):
+                    for file in os.listdir(output_dir):
+                        if file.startswith('FINAL_') and (file.endswith('.csv') or file.endswith('.txt')):
+                            result_files.append(os.path.join(output_dir, file))
+                    
+                    # Fallback to any CSV/TXT if no FINAL files
+                    if not result_files:
+                        for file in os.listdir(output_dir):
+                            if file.endswith('.csv') or file.endswith('.txt'):
+                                result_files.append(os.path.join(output_dir, file))
                 
                 job_manager.update_job(
                     job_id,
                     status='completed',
                     progress=100,
-                    results_ready=True,
+                    results_ready=len(result_files) > 0,
                     result_files=result_files
                 )
                 
+                print(f"Job {job_id} completed with {len(result_files)} result files")
+                
             except Exception as e:
-                job_manager.update_job(
-                    job_id,
-                    status='failed',
-                    errors=[str(e)]
-                )
+                print(f"Scraper error: {e}")
+                job_manager.update_job(job_id, status='failed', errors=[str(e)])
         else:
-            # Mock processing for demo
+            # Mock processing remains the same
             total_steps = 10
             for i in range(total_steps + 1):
-                time.sleep(2)  # Simulate processing
+                time.sleep(2)
                 progress = int((i / total_steps) * 100)
-                emails_found = i * 5  # Mock emails found
+                emails_found = i * 5
                 
                 job_manager.update_job(
                     job_id,
@@ -157,7 +218,6 @@ def run_scraper_process(job_id, input_file, config):
                 )
                 
                 if progress == 100:
-                    # Create mock result files
                     csv_file = os.path.join(output_dir, f"results_{job_id}.csv")
                     emails_file = os.path.join(output_dir, f"emails_{job_id}.txt")
                     
@@ -176,11 +236,8 @@ def run_scraper_process(job_id, input_file, config):
                     )
         
     except Exception as e:
-        job_manager.update_job(
-            job_id,
-            status='failed',
-            errors=[str(e)]
-        )
+        print(f"Critical error: {e}")
+        job_manager.update_job(job_id, status='failed', errors=[str(e)])
 
 @app.route('/')
 def index():
@@ -206,7 +263,12 @@ def upload_file():
         os.makedirs(upload_dir, exist_ok=True)
         
         filepath = os.path.join(upload_dir, filename)
-        file.save(filepath)
+        try:
+            file.save(filepath)
+            flash(f'File uploaded successfully! Job ID: {job_id}')
+        except Exception as e:
+            flash(f'Error saving file: {str(e)}')
+            return None
         
         # Get configuration from form
         config = {
@@ -463,68 +525,117 @@ def create_templates():
 """
     
     # Job status template
+    # Job status template
     job_status_template = """
-{% extends "base.html" %}
+    {% extends "base.html" %}
 
-{% block content %}
-<div class="row justify-content-center">
-    <div class="col-md-10">
-        <div class="card">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <h4>📊 Job Status: {{ job.id }}</h4>
-                <span class="badge bg-{% if job.status == 'completed' %}success{% elif job.status == 'failed' %}danger{% elif job.status == 'running' %}warning{% else %}secondary{% endif %}">
-                    {{ job.status.upper() }}
-                </span>
-            </div>
-            <div class="card-body">
-                <div class="row mb-3">
-                    <div class="col-md-6">
-                        <strong>File:</strong> {{ job.filename }}<br>
-                        <strong>Started:</strong> {{ (job.start_time|int) | timestamp }}<br>
-                        <strong>Companies:</strong> {{ job.total_companies }}
-                    </div>
-                    <div class="col-md-6">
-                        <strong>Processed:</strong> {{ job.processed }}<br>
-                        <strong>Emails Found:</strong> {{ job.emails_found }}<br>
-                        <strong>Workers:</strong> {{ job.config.workers }}
-                    </div>
+    {% block content %}
+    <div class="row justify-content-center">
+        <div class="col-md-10">
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h4>📊 Job Status: {{ job.id }}</h4>
+                    <span class="badge bg-{% if job.status == 'completed' %}success{% elif job.status == 'failed' %}danger{% elif job.status == 'running' %}warning{% else %}secondary{% endif %}">
+                        {{ job.status.upper() }}
+                    </span>
                 </div>
-                
-                <div class="progress mb-3">
-                    <div class="progress-bar" role="progressbar" style="width: {{ job.progress }}%">
-                        {{ job.progress }}%
+                <div class="card-body">
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <strong>File:</strong> {{ job.filename }}<br>
+                            <strong>Started:</strong> {{ (job.start_time|int) | timestamp }}<br>
+                            <strong>Companies:</strong> {{ job.total_companies }}
+                        </div>
+                        <div class="col-md-6">
+                            <strong>Processed:</strong> <span id="processed">{{ job.processed }}</span><br>
+                            <strong>Emails Found:</strong> <span id="emails_found">{{ job.emails_found }}</span><br>
+                            <strong>Workers:</strong> {{ job.config.workers }}
+                        </div>
                     </div>
+                    
+                    <div class="progress mb-3">
+                        <div class="progress-bar" role="progressbar" style="width: {{ job.progress }}%" id="progress-bar">
+                            <span id="progress-text">{{ job.progress }}%</span>
+                        </div>
+                    </div>
+                    
+                    {% if job.status == 'completed' and job.results_ready %}
+                        <div class="alert alert-success">
+                            <h5>✅ Job Completed Successfully!</h5>
+                            <p>Found {{ job.emails_found }} emails from {{ job.processed }} companies</p>
+                            <a href="/download/{{ job.id }}" class="btn btn-success">
+                                📥 Download Results
+                            </a>
+                        </div>
+                    {% elif job.status == 'failed' %}
+                        <div class="alert alert-danger">
+                            <h5>❌ Job Failed</h5>
+                            {% for error in job.errors %}
+                                <p>{{ error }}</p>
+                            {% endfor %}
+                        </div>
+                    {% elif job.status == 'running' %}
+                        <div class="alert alert-info">
+                            <h5>🔄 Job Running...</h5>
+                            <p>Processing companies and discovering emails in real-time</p>
+                            
+                            <!-- Real-time logs section -->
+                            <div class="mt-3">
+                                <h6>Recent Successes:</h6>
+                                <div id="live-logs" class="bg-dark text-light p-3 rounded" style="height: 200px; overflow-y: auto; font-family: monospace; font-size: 12px;">
+                                    Loading logs...
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <script>
+                            // Auto-refresh progress every 3 seconds
+                            function updateProgress() {
+                                fetch('/api/job/{{ job.id }}')
+                                    .then(response => response.json())
+                                    .then(data => {
+                                        document.getElementById('processed').textContent = data.processed;
+                                        document.getElementById('emails_found').textContent = data.emails_found;
+                                        document.getElementById('progress-text').textContent = data.progress + '%';
+                                        document.getElementById('progress-bar').style.width = data.progress + '%';
+                                        
+                                        if (data.status === 'completed') {
+                                            location.reload();
+                                        }
+                                    });
+                            }
+                            
+                            // Update logs every 5 seconds
+                            function updateLogs() {
+                                fetch('/api/logs/{{ job.id }}')
+                                    .then(response => response.json())
+                                    .then(data => {
+                                        const logsDiv = document.getElementById('live-logs');
+                                        if (data.logs && data.logs.length > 0) {
+                                            const logEntries = data.logs.map(log => 
+                                                `✅ ${log.company} -> ${log.emails} (${log.method})`
+                                            ).join('\\n');
+                                            logsDiv.textContent = logEntries;
+                                            logsDiv.scrollTop = logsDiv.scrollHeight;
+                                        }
+                                    });
+                            }
+                            
+                            // Start intervals
+                            setInterval(updateProgress, 3000);
+                            setInterval(updateLogs, 5000);
+                            
+                            // Initial updates
+                            updateProgress();
+                            updateLogs();
+                        </script>
+                    {% endif %}
                 </div>
-                
-                {% if job.status == 'completed' and job.results_ready %}
-                    <div class="alert alert-success">
-                        <h5>✅ Job Completed Successfully!</h5>
-                        <a href="/download/{{ job.id }}" class="btn btn-success">
-                            📥 Download Results
-                        </a>
-                    </div>
-                {% elif job.status == 'failed' %}
-                    <div class="alert alert-danger">
-                        <h5>❌ Job Failed</h5>
-                        {% for error in job.errors %}
-                            <p>{{ error }}</p>
-                        {% endfor %}
-                    </div>
-                {% elif job.status == 'running' %}
-                    <div class="alert alert-info">
-                        <h5>🔄 Job Running...</h5>
-                        <p>The email discovery process is currently running. This page will auto-refresh.</p>
-                    </div>
-                    <script>
-                        setTimeout(() => location.reload(), 5000);
-                    </script>
-                {% endif %}
             </div>
         </div>
     </div>
-</div>
-{% endblock %}
-"""
+    {% endblock %}
+    """
     
     # All jobs template
     all_jobs_template = """
@@ -600,15 +711,63 @@ def timestamp_filter(timestamp):
     return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
 
 if __name__ == '__main__':
-    # Create templates on startup instead of using deprecated decorator
     create_templates()
     app.run(host='0.0.0.0', port=5000, debug=True)
-# Custom filter for timestamp
-@app.template_filter('timestamp')
-def timestamp_filter(timestamp):
-    """Convert timestamp to readable format."""
-    return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
 
-if __name__ == '__main__':
-    create_templates()
-    app.run(host='0.0.0.0', port=5000, debug=True)
+@app.route('/logs/<job_id>')
+def job_logs(job_id):
+    """Show real-time logs for a job."""
+    job = job_manager.get_job(job_id)
+    if not job:
+        return "Job not found", 404
+    
+    # Read log files from output directory
+    output_dir = job['output_dir']
+    logs = []
+    
+    if os.path.exists(output_dir):
+        # Look for progress files to show processing logs
+        progress_files = sorted([f for f in os.listdir(output_dir) if f.startswith('progress_batch_')])
+        
+        for progress_file in progress_files[-3:]:  # Last 3 files
+            file_path = os.path.join(output_dir, progress_file)
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        if row.get('success') == 'True' and row.get('emails_found'):
+                            logs.append(f"✅ {row.get('name', 'Unknown')} -> {row.get('emails_found', '')}")
+            except:
+                continue
+    
+    return '<br>'.join(logs[-50:]) if logs else 'No logs available yet...'
+
+@app.route('/api/logs/<job_id>')
+def api_job_logs(job_id):
+    """API endpoint for job logs."""
+    job = job_manager.get_job(job_id)
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+    
+    output_dir = job['output_dir']
+    logs = []
+    
+    if os.path.exists(output_dir):
+        progress_files = sorted([f for f in os.listdir(output_dir) if f.startswith('progress_batch_')])
+        
+        for progress_file in progress_files[-2:]:  # Last 2 files
+            file_path = os.path.join(output_dir, progress_file)
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        if row.get('success') == 'True' and row.get('emails_found'):
+                            logs.append({
+                                'company': row.get('name', 'Unknown'),
+                                'emails': row.get('emails_found', ''),
+                                'method': row.get('discovery_method', 'unknown')
+                            })
+            except:
+                continue
+    
+    return jsonify({'logs': logs[-20:]})  # Last 20 successes

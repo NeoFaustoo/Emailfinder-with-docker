@@ -103,7 +103,7 @@ def compile_patterns():
         'excessive_numbers': re.compile(r'[0-9]{5,}'),
 
         # French business email patterns
-        'french_business': re.compile(r'^(?:contact|info|commercial|vente|ventes|direction|accueil|secretariat|administration|rh|ressources-humaines|communication|marketing|service-client|support|technique|comptabilite|finance|juridique)@', re.IGNORECASE)
+        'french_business': re.compile(r'^(?:contact|info|commercial|vente|ventes|direction|accueil|secretariat|administration|rh|ressources-humaines|communication|marketing|service-client|support|technique|comptabilite|finance|juridique)@', re.IGNORECASE),
 
         # ENHANCED MAILTO PATTERNS:
         'mailto_simple': re.compile(r'mailto:([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})', re.IGNORECASE),
@@ -150,7 +150,7 @@ SOCIAL_MEDIA_DOMAINS = {
 class HTTPSessionManager:
     """Manages HTTP sessions with connection pooling and reuse."""
     
-    def __init__(self, max_sessions=50):
+    def __init__(self, max_sessions=200):
         self.sessions = Queue()
         self.max_sessions = max_sessions
         self.lock = threading.Lock()
@@ -488,6 +488,9 @@ def clean_url(url: str) -> str:
         if not url or len(url) < 4:
             return None
             
+        if '?' in url:
+            url = url.split('?')[0]
+            
         # Decode URL-encoded characters
         try:
             url = unquote(url)
@@ -600,8 +603,7 @@ def is_valid_email(email: str) -> bool:
         # Numbers-only or mostly numbers local part
         r'^[0-9]+@',
         
-        # Suspicious character patterns
-        r'.*[0-9]{8}[a-z0-9]{8}.*@',  # Pattern like in your fake emails
+
     ]
     
     # Apply strict filtering (even for French business emails for these patterns)
@@ -651,12 +653,12 @@ def is_valid_email(email: str) -> bool:
         # Additional checks for non-business emails
         
         # Local part too long (suspicious)
-        if len(local_part) > 40:
+        if len(local_part) > 30:
             return False
             
         # Too many numbers in local part (but allow some)
         number_count = sum(c.isdigit() for c in local_part)
-        if number_count > len(local_part) * 0.7:  # More than 70% numbers
+        if number_count > len(local_part) * 0.6:  # More than 60% numbers
             return False
         
         # Check for IP address domains
@@ -716,9 +718,7 @@ def decode_obfuscated_content(content: str) -> str:
                 decoded_content = decoded_content.encode().decode('unicode_escape')
             except:
                 pass
-        
-        # REMOVED: ROT13 decoding (this was creating fake emails)
-        # The ROT13 section has been completely removed to prevent fake emails
+    
         
     except:
         pass
@@ -736,7 +736,8 @@ def fetch_website_content(url: str, max_retries: int = 2) -> Tuple[str, List[str
         for attempt in range(max_retries + 1):
             try:
                 # Progressive timeout strategy
-                timeout = 3 + (attempt * 1.5)  # 3s, 4.5s, 6s
+                timeout = 2 + (attempt * 0.5)  # 2s, 2.5s, 3s
+
                 
                 # Add small delay for retries
                 if attempt > 0:
@@ -754,14 +755,14 @@ def fetch_website_content(url: str, max_retries: int = 2) -> Tuple[str, List[str
                 
                 # Check content length to avoid downloading massive files
                 content_length = response.headers.get('content-length')
-                if content_length and int(content_length) > 5 * 1024 * 1024:  # 5MB limit
+                if content_length and int(content_length) > 10 * 1024 * 1024:  # 10MB limit
                     errors.append(f"content_too_large_{content_length}")
                     return None, errors
                 
                 # Read content with size limit
                 content = ""
                 size = 0
-                max_size = 2 * 1024 * 1024  # 2MB limit
+                max_size = 5 * 1024 * 1024  # 5MB limit
                 
                 for chunk in response.iter_content(chunk_size=8192, decode_unicode=True):
                     if chunk:
@@ -839,7 +840,7 @@ def extract_emails_from_html(html_content: str, domain: str = None) -> Tuple[Lis
     """Comprehensive single-pass email extraction with advanced obfuscation detection."""
     if not html_content:
         return [], {}
-    
+    compile_patterns()
     all_emails = set()
     extraction_stats = defaultdict(int)
     
@@ -1221,9 +1222,7 @@ def discover_emails_via_sitemap(domain: str) -> Tuple[List[str], List[str], Dict
     for sitemap_url in sitemap_urls:
         urls = parse_sitemap(sitemap_url)
         all_urls.extend(urls)
-        stats['sitemap_urls_found'] += len(urls)
-        time.sleep(random.uniform(0.1, 0.2))
-    
+        stats['sitemap_urls_found'] += len(urls)    
     # Remove duplicates and prioritize
     unique_urls = list(set(all_urls))
     priority_urls = get_priority_urls(unique_urls, domain)
@@ -1258,8 +1257,7 @@ def discover_emails_via_sitemap(domain: str) -> Tuple[List[str], List[str], Dict
                     for key, value in extraction_stats.items():
                         stats[f'extraction_{key}'] += value
                 
-                # Small delay between processing results
-                time.sleep(random.uniform(0.1, 0.2))
+        
                 
             except:
                 continue
@@ -1366,6 +1364,9 @@ def discover_emails_for_domain(domain: str) -> Tuple[List[str], str, List[str], 
                     pages_accessed.append(url)
                     successful_categories.add(category)
                     
+                    # Add debug info for successful email extraction
+                    print(f"DEBUG: Found {len(emails)} emails for {domain} from {url} - {', '.join(emails[:3])}{'...' if len(emails) > 3 else ''}")
+                    
                     # Update stats
                     for key, value in extraction_stats.items():
                         stats[f'extraction_{key}'] += value
@@ -1379,8 +1380,7 @@ def discover_emails_for_domain(domain: str) -> Tuple[List[str], str, List[str], 
             stats['processing_error'] += 1
             continue
         
-        # Brief delay between requests
-        time.sleep(random.uniform(0.1, 0.2))
+    
     
     # If no emails found through direct scraping, try sitemap
     if not all_emails:
@@ -1407,6 +1407,7 @@ def discover_emails_for_domain(domain: str) -> Tuple[List[str], str, List[str], 
             method = "web_other"
     else:
         method = "not_found"
+    
     
     return list(all_emails), method, pages_accessed, dict(stats)
 
@@ -1498,6 +1499,10 @@ def find_latest_progress_file(output_dir: str) -> tuple:
 
 def save_progress_csv(results, output_dir, batch_number, total_processed):
     """Enhanced progress saving with better data handling."""
+
+    if len(results) < 500 and total_processed % 500 != 0:  # Buffer until 500 results or completion
+        return None
+
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     filename = f"progress_batch_{batch_number:03d}_{total_processed}_companies_{timestamp}.csv"
     filepath = os.path.join(output_dir, filename)
@@ -1562,12 +1567,17 @@ def process_single_company_worker(company_data, verbose=False, start_time=None, 
     
     if verbose and website:
         print(f"DEBUG: Processing {name} with website: '{website}'")
-    
-    # Enhanced domain extraction
+
+    # Enhanced domain extraction with debug info
     domain = clean_url(website) if website else None
-    
-    if verbose and website and not domain:
-        print(f"DEBUG: Failed to extract domain from '{website}' for {name}")
+
+    if verbose:
+        if website and not domain:
+            print(f"DEBUG: Failed to extract domain from '{website}' for {name} - likely has UTM parameters")
+        elif domain:
+            print(f"DEBUG: Extracted domain '{domain}' from '{website}' for {name}")
+        elif not website:
+            print(f"DEBUG: {name} has no website field")
     
     # Process company
     if domain:
@@ -1772,8 +1782,8 @@ def process_files(input_files, output_dir="results", workers=150, verbose=False,
                 total_processed_count += 1
                 completed_count += 1
                 
-                # Enhanced progress tracking every 300 companies
-                if total_processed_count % 300 == 0:
+                # Enhanced progress tracking every 500 companies
+                if total_processed_count % 500 == 0:    
                     # Save progress with timing info
                     progress_file = save_progress_csv(current_batch_results, output_dir, batch_number, total_processed_count)
                     
@@ -1795,12 +1805,12 @@ def process_files(input_files, output_dir="results", workers=150, verbose=False,
                     current_batch_results = []
                     batch_number += 1
                 
-                # Frequent progress updates every 50 companies
-                elif completed_count % 25 == 0:
+                # Frequent progress updates every 10 companies
+                elif completed_count % 10 == 0:
                     current_time = time.time()
                     time_since_last = current_time - last_progress_time
                     
-                    if time_since_last >= 15:  # Every 15 seconds
+                    if time_since_last >= 5:  # Every 5 seconds
                         elapsed_time = current_time - start_time
                         current_rate = current_session_count / elapsed_time * 60 if elapsed_time > 0 else 0
                         remaining = total_companies - current_session_count
@@ -1832,6 +1842,240 @@ def process_files(input_files, output_dir="results", workers=150, verbose=False,
         batch_emails = sum(len(r.get('emails_found', [])) for r in current_batch_results)
         total_emails_found += batch_emails
         all_results.extend(current_batch_results)
+    
+    # Generate comprehensive final report
+    total_time = time.time() - start_time
+    success_count = len([r for r in all_results if r.get('success', False)])
+    success_rate = (success_count / total_processed_count * 100) if total_processed_count > 0 else 0.0
+    
+    print(f"\n🎉 === ENHANCED PROCESSING COMPLETE ===")
+    print(f"📊 Total companies processed: {total_processed_count}")
+    print(f"✅ Companies with emails found: {success_count} ({success_rate:.1f}%)")
+    print(f"📧 Total unique emails discovered: {total_emails_found}")
+    print(f"⏱️  Total processing time: {total_time/60:.1f} minutes")
+    print(f"🚀 Average processing rate: {total_processed_count/(total_time/60):.1f} companies/minute")
+    
+    # Generate performance monitoring report if enabled
+    if monitor:
+        performance_monitor.generate_report()
+    
+    # Generate final consolidated report
+    generate_final_report(all_results, output_dir, total_processed_count, total_emails_found, start_time, current_session_count)
+    
+    print(f"📄 All results saved in: {output_dir}/")
+
+
+def process_files_with_callback(input_files, output_dir="results", workers=150, verbose=False, resume=False, limit=None, max_hours=None, monitor=False, progress_callback=None, job_id=None):
+    """Enhanced file processing with web interface progress callback."""
+    start_time = time.time()
+    
+    # Initialize performance monitor
+    performance_monitor = PerformanceMonitor(enabled=monitor)
+    
+    # Enhanced resume functionality
+    processed_names = set()
+    all_results = []
+    total_emails_found = 0
+    batch_number = 1
+    
+    if resume:
+        latest_file, companies_count, processed_names, total_emails_found, batch_number, previous_results = find_latest_progress_file(output_dir)
+        if latest_file:
+            print(f"✅ RESUMING: {companies_count} companies already processed, {total_emails_found} emails found")
+            print(f"✅ Next batch number: {batch_number}")
+            
+            # Convert previous results to proper format
+            for prev_result in previous_results:
+                emails_str = prev_result.get('emails_found', '')
+                emails_list = [e.strip() for e in emails_str.split(',') if e.strip()] if emails_str else []
+                prev_result['emails_found'] = emails_list
+                prev_result['success'] = len(emails_list) > 0
+                all_results.append(prev_result)
+        else:
+            print("No previous progress found, starting fresh")
+    
+    # Enhanced file loading with better error handling
+    all_companies = []
+    total_loaded = 0
+    skipped_processed = 0
+    
+    print(f"📂 Loading companies from {len(input_files)} file(s)...")
+    
+    for input_file in input_files:
+        print(f"Processing file: {input_file}")
+        
+        # Convert Excel/CSV to NDJSON if needed
+        if input_file.endswith(('.xlsx', '.xls', '.csv')):
+            if not PANDAS_AVAILABLE:
+                print(f"Skipping {input_file}: pandas not available")
+                continue
+            ndjson_file = convert_file_to_ndjson(input_file)
+            if not ndjson_file:
+                print(f"Failed to convert {input_file}")
+                continue
+            input_file = ndjson_file
+        
+        # Load NDJSON with enhanced processing
+        try:
+            with open(input_file, 'r', encoding='utf-8') as f:
+                for line_num, line in enumerate(f, 1):
+                    try:
+                        line = line.strip()
+                        if not line:
+                            continue
+                            
+                        company = json.loads(line)
+                        company_name = get_field_value(company, ['name', 'company_name', 'raw_name', 'business_name'])
+                        
+                        if company_name:
+                            total_loaded += 1
+                            
+                            # Skip if already processed
+                            if company_name not in processed_names:
+                                all_companies.append(company)
+                                
+                                # Apply limit if specified
+                                if limit and len(all_companies) >= limit:
+                                    print(f"🔢 LIMIT REACHED: Processing only {limit} companies")
+                                    break
+                            else:
+                                skipped_processed += 1
+                                if verbose:
+                                    print(f"SKIP: {company_name} (already processed)")
+                                    
+                    except json.JSONDecodeError as e:
+                        if verbose:
+                            print(f"Warning: Invalid JSON on line {line_num} in {input_file}: {e}")
+                        continue
+                        
+                # Break outer loop if limit reached
+                if limit and len(all_companies) >= limit:
+                    break
+                    
+        except Exception as e:
+            print(f"Error reading {input_file}: {e}")
+            continue
+    
+    total_companies = len(all_companies)
+    print(f"📊 LOADED: {total_companies} companies to process")
+    print(f"📋 SKIPPED: {skipped_processed} already processed companies")
+    
+    if total_companies == 0:
+        if skipped_processed > 0:
+            print("✅ All companies already processed!")
+            success_count = len([r for r in all_results if r.get('success', False)])
+            success_rate = (success_count / len(processed_names) * 100) if processed_names else 0.0
+            print(f"📊 Final stats: {success_count} companies found emails ({success_rate:.1f}% success rate)")
+            print(f"📧 Total emails discovered: {total_emails_found}")
+        else:
+            print("❌ No companies found with valid names")
+        return
+    
+    # Enhanced parallel processing with intelligent batching
+    total_processed_count = len(processed_names)
+    current_session_count = 0
+    current_batch_results = []
+    
+    print(f"🚀 Starting enhanced processing with {workers} workers...")
+    print(f"⚡ Session pool initialized with connection reuse")
+    
+    # Intelligent worker adjustment based on company count
+    effective_workers = min(workers, total_companies, 200)  # Cap at 200 for stability
+    
+    # Process with enhanced ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+        # Submit all tasks with enhanced error handling
+        future_to_company = {}
+        
+        for company in all_companies:
+            future = executor.submit(
+                process_single_company_worker, 
+                company, verbose, start_time, performance_monitor
+            )
+            future_to_company[future] = company
+        
+        # Process completed tasks with enhanced monitoring
+        completed_count = 0
+        last_progress_time = time.time()
+        
+        for future in as_completed(future_to_company, timeout=max_hours*3600 if max_hours else None):
+            try:
+                result = future.result()
+                current_batch_results.append(result)
+                current_session_count += 1
+                total_processed_count += 1
+                completed_count += 1
+                
+                # Update emails found count
+                if result.get('success', False):
+                    total_emails_found += len(result.get('emails_found', []))
+                
+                # Send progress update to web interface
+                if progress_callback:
+                    progress_callback(current_session_count, total_companies, total_emails_found)
+                
+                # Enhanced progress tracking every 500 companies (reduced from 300)
+                if current_session_count % 500 == 0:
+                    # Save progress with timing info
+                    progress_file = save_progress_csv(current_batch_results, output_dir, batch_number, total_processed_count)
+                    
+                    # Calculate comprehensive stats
+                    batch_emails = sum(len(r.get('emails_found', [])) for r in current_batch_results)
+                    batch_success = len([r for r in current_batch_results if r.get('success', False)])
+                    
+                    # Performance metrics
+                    elapsed_time = time.time() - start_time
+                    current_rate = current_session_count / elapsed_time * 60 if elapsed_time > 0 else 0
+                    remaining = total_companies - current_session_count
+                    eta_minutes = remaining / current_rate if current_rate > 0 else 0
+                    
+                    print(f"📊 BATCH {batch_number} COMPLETE | {batch_success} successes | {batch_emails} emails | ETA: {eta_minutes:.1f}min")
+                    
+                    # Reset batch
+                    all_results.extend(current_batch_results)
+                    current_batch_results = []
+                    batch_number += 1
+                
+                # Frequent progress updates every 10 companies
+                elif completed_count % 10 == 0:
+                    current_time = time.time()
+                    time_since_last = current_time - last_progress_time
+                    
+                    if time_since_last >= 5:  # Every 5 seconds
+                        elapsed_time = current_time - start_time
+                        current_rate = current_session_count / elapsed_time * 60 if elapsed_time > 0 else 0
+                        remaining = total_companies - current_session_count
+                        eta_minutes = remaining / current_rate if current_rate > 0 else 0
+                        
+                        # Quick success count for current batch
+                        current_batch_success = len([r for r in current_batch_results if r.get('success', False)])
+                        current_batch_emails = sum(len(r.get('emails_found', [])) for r in current_batch_results)
+                        
+                        print(f"📊 Progress: {current_session_count}/{total_companies} | {current_batch_success} successes | {current_batch_emails} emails | Speed: {current_rate:.1f}/min | ETA: {eta_minutes:.1f}min")
+                        last_progress_time = current_time
+                
+                # Check max hours limit
+                if max_hours and (time.time() - start_time) > max_hours * 3600:
+                    print(f"\n⏰ Max runtime of {max_hours} hours reached. Stopping gracefully...")
+                    # Cancel remaining futures
+                    for remaining_future in future_to_company:
+                        remaining_future.cancel()
+                    break
+                
+            except Exception as e:
+                if verbose:
+                    print(f"Error processing company: {e}")
+                continue
+    
+    # Save final batch if any remaining
+    if current_batch_results:
+        save_progress_csv(current_batch_results, output_dir, batch_number, total_processed_count)
+        batch_emails = sum(len(r.get('emails_found', [])) for r in current_batch_results)
+        all_results.extend(current_batch_results)
+    
+    # Final progress update
+    if progress_callback:
+        progress_callback(total_companies, total_companies, total_emails_found)
     
     # Generate comprehensive final report
     total_time = time.time() - start_time

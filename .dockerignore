@@ -1,0 +1,10 @@
+data/
+results/
+uploads/
+templates/
+static/
+.env
+.gitignore
+.git/
+.gitignore
+.git/
