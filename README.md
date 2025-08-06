@@ -1,6 +1,34 @@
-# 🔍 Enhanced Email Scraper with Streaming Support
+# 🔍 Enhanced Email Scraper Web Application
 
-A high-performance email discovery script with streaming processing, direct file updates, and REST API support.
+A complete web application for high-performance email discovery with streaming processing, direct file updates, REST API support, and a modern React frontend.
+
+## ✨ Features
+
+### 🚀 **Core Capabilities**
+- **📤 File Upload**: Support for CSV, Excel (.xlsx, .xls), and NDJSON files
+- **⚙️ Configurable Processing**: Adjust workers, limits, timeouts, and monitoring options
+- **📊 Real-time Progress**: Live job status updates and progress tracking
+- **📥 Result Downloads**: Download results as ZIP files with CSV and TXT formats
+- **🔄 Job Management**: View all jobs and their status
+- **🐳 Containerized**: Fully containerized with Docker and Docker Compose
+- **🔌 REST API**: FastAPI-based REST API for integration with any frontend
+- **🎨 Modern UI**: React-based frontend with real-time updates and intuitive interface
+
+### 🌊 **NEW: Streaming Features**
+- **🌊 Streaming Processing**: Memory-efficient batch processing with 100+ workers
+- **💾 Direct File Updates**: Results written directly back to input files
+- **🔄 Automatic Backups**: Original files backed up before modification
+- **📊 Real-time Streaming**: Live progress updates via async processing
+- **🧠 Memory Management**: Intelligent memory monitoring and garbage collection
+
+### 🎨 **Frontend Features**
+- **📊 Dashboard**: Overview of system health and recent jobs
+- **📤 Job Submission**: Drag-and-drop file upload with configuration options
+- **📋 Job Management**: List, search, filter, and sort all jobs
+- **📈 Real-time Monitoring**: Live progress updates and detailed job information
+- **📊 Statistics**: Comprehensive analytics and performance metrics
+- **🔔 Notifications**: Real-time alerts and status updates
+- **📱 Responsive Design**: Works on desktop, tablet, and mobile devices
 
 ## ✨ Features
 
@@ -22,7 +50,23 @@ A high-performance email discovery script with streaming processing, direct file
 
 ## 🚀 Quick Start
 
-### Option 1: API Server (Recommended)
+### Option 1: Complete Web Application (Recommended)
+
+```bash
+# 1. Build and start the complete application
+docker-compose up --build
+
+# 2. Access the web application
+# Frontend: http://localhost:3000
+# API Documentation: http://localhost:8000/docs
+# Health Check: http://localhost:8000/api/health
+# Kafka UI: http://localhost:8080
+
+# 3. Stop the application
+docker-compose down
+```
+
+### Option 2: API Server Only
 
 ```bash
 # 1. Install dependencies
@@ -62,23 +106,25 @@ python enhanced_email_scraper.py large_dataset.xlsx --streaming --workers 200 --
 python enhanced_email_scraper.py *.csv --streaming --workers 100 --batch-size 250
 ```
 
-### Option 3: Docker
+### Option 3: Docker (Complete Stack)
 
 ```bash
-# Build and run with Docker Compose (Recommended)
+# Build and run the complete application stack
 docker-compose up --build
 
-# Or build and run manually
+# Access the services
+# Frontend: http://localhost:3000
+# API Documentation: http://localhost:8000/docs
+# Health Check: http://localhost:8000/api/health
+# Kafka UI: http://localhost:8080
+
+# Or build and run API only manually
 docker build -t email-scraper-api .
 docker run -p 8000:8000 \
   -v $(pwd)/uploads:/app/uploads \
   -v $(pwd)/data:/app/data \
   -v $(pwd)/backups:/app/backups \
   email-scraper-api
-
-# Access the API
-# API Documentation: http://localhost:8000/docs
-# Health Check: http://localhost:8000/api/health
 ```
 
 ## 🌊 Streaming Processing
@@ -205,19 +251,49 @@ Run tests with:
 python test_api.py
 ```
 
+## 🎨 Frontend Development
+
+### Local Development
+
+```bash
+# Navigate to frontend directory
+cd email-scraper-frontend
+
+# Install dependencies
+npm install
+
+# Start development server
+npm start
+
+# Build for production
+npm run build
+```
+
+### Frontend Features
+
+- **📊 Dashboard**: System overview with health status and recent jobs
+- **📤 Job Submission**: Drag-and-drop file upload with advanced configuration
+- **📋 Job Management**: Comprehensive job listing with search and filtering
+- **📈 Real-time Monitoring**: Live progress updates and detailed job tracking
+- **📊 Statistics**: Performance analytics and processing metrics
+- **🔔 Notifications**: Real-time alerts and status updates
+- **📱 Responsive Design**: Optimized for all device sizes
+
 ## 🐳 Docker Deployment
 
 ### Quick Start with Docker Compose
 
 ```bash
-# 1. Build and start the API
+# 1. Build and start the complete application
 docker-compose up --build
 
-# 2. Access the API
+# 2. Access the services
+# Frontend: http://localhost:3000
 # API Documentation: http://localhost:8000/docs
 # Health Check: http://localhost:8000/api/health
+# Kafka UI: http://localhost:8080
 
-# 3. Stop the service
+# 3. Stop the services
 docker-compose down
 ```
 
@@ -270,13 +346,26 @@ docker rm email-scraper-api
 
 The Docker setup includes:
 
-- **Port**: 8000 (FastAPI default)
-- **Volumes**: 
-  - `./uploads` - File uploads
-  - `./data` - Persistent data and job information
-  - `./backups` - Automatic file backups
-- **Health Check**: Monitors `/api/health` endpoint
-- **Environment**: Production-ready configuration
+#### Backend Services
+- **API Port**: 8000 (FastAPI default)
+- **Worker**: Background processing with Kafka integration
+- **Kafka**: Message broker for job queuing and real-time updates
+- **Redis**: Caching and session management
+- **Kafka UI**: Web interface for Kafka monitoring (port 8080)
+
+#### Frontend Service
+- **Frontend Port**: 3000 (React app served by nginx)
+- **Nginx**: Production-grade web server with API proxy
+- **Health Check**: Monitors frontend availability
+
+#### Volumes
+- `./uploads` - File uploads
+- `./data` - Persistent data and job information
+- `./backups` - Automatic file backups
+
+#### Network
+- **email-scraper-net**: Internal Docker network for service communication
+- **Health Checks**: Monitor service availability
 - **Restart Policy**: Automatic restart on failure
 
 ### Testing with Docker

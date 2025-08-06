@@ -41,6 +41,10 @@ from bs4 import BeautifulSoup, Comment
 import urllib3
 import warnings
 
+# Add aiohttp for async HTTP requests
+import aiohttp
+import aiohttp.client_exceptions
+
 # Suppress all warnings for clean output
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 warnings.filterwarnings('ignore')
@@ -220,6 +224,24 @@ class HTTPSessionManager:
 
 # Global session manager
 session_manager = HTTPSessionManager()
+
+# Global aiohttp session for async requests
+aiohttp_session = None
+
+async def get_aiohttp_session():
+    """Get or create aiohttp session for async requests."""
+    global aiohttp_session
+    if aiohttp_session is None or aiohttp_session.closed:
+        timeout = aiohttp.ClientTimeout(total=30)
+        connector = aiohttp.TCPConnector(limit=100, limit_per_host=10, ssl=False)
+        aiohttp_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+    return aiohttp_session
+
+async def close_aiohttp_session():
+    """Close aiohttp session."""
+    global aiohttp_session
+    if aiohttp_session and not aiohttp_session.closed:
+        await aiohttp_session.close()
 
 @dataclass
 class ProcessingResult:
@@ -583,7 +605,11 @@ class StreamingEmailProcessor:
         
         # Process batches
         file_results = []
+        batch_number = 0
         async for batch in streamer:
+            batch_number += 1
+            logging.info(f"Processing batch {batch_number} with {len(batch)} companies for job {job_id}")
+            
             # Process batch with workers
             batch_results = await self._process_batch_with_workers(batch, job_id)
             file_results.extend(batch_results)
@@ -593,13 +619,18 @@ class StreamingEmailProcessor:
             job_manager.total_successes += len([r for r in batch_results if r.success])
             job_manager.total_emails += sum(len(r.emails_found) for r in batch_results)
             
+            batch_successes = len([r for r in batch_results if r.success])
+            batch_emails = sum(len(r.emails_found) for r in batch_results)
+            
+            logging.info(f"Completed batch {batch_number}: {batch_successes}/{len(batch_results)} successful, {batch_emails} emails found")
+            
             # Send batch results
             await self.result_queue.put({
                 'job_id': job_id,
                 'type': 'batch_complete',
                 'batch_size': len(batch_results),
-                'batch_successes': len([r for r in batch_results if r.success]),
-                'batch_emails': sum(len(r.emails_found) for r in batch_results),
+                'batch_successes': batch_successes,
+                'batch_emails': batch_emails,
                 'timestamp': time.time()
             })
         
@@ -661,6 +692,7 @@ class StreamingEmailProcessor:
         
         # Process company
         if domain:
+            logging.info(f"Processing company: {name} (domain: {domain})")
             emails, method, pages_accessed, stats = discover_emails_for_domain(domain)
             
             result = ProcessingResult(
@@ -675,7 +707,13 @@ class StreamingEmailProcessor:
                 pages_accessed=pages_accessed,
                 processing_time=time.time() - start_time
             )
+            
+            if len(emails) > 0:
+                logging.info(f"Successfully found {len(emails)} emails for {name} using {method}")
+            else:
+                logging.warning(f"No emails found for {name} (domain: {domain})")
         else:
+            logging.warning(f"No valid domain found for company: {name} (website: {website})")
             result = ProcessingResult(
                 name=name,
                 domain=None,
@@ -1357,6 +1395,319 @@ def fetch_website_content(url: str, max_retries: int = 2) -> Tuple[str, List[str
             session_manager.return_session(session)
     
     return None, errors
+
+async def fetch_website_content_async(url: str, max_retries: int = 2) -> Tuple[str, List[str]]:
+    """Async version of website content fetching with aiohttp."""
+    errors = []
+    session = await get_aiohttp_session()
+    
+    for attempt in range(max_retries + 1):
+        try:
+            # Progressive timeout strategy
+            timeout = 2 + (attempt * 0.5)  # 2s, 2.5s, 3s
+            
+            # Add small delay for retries
+            if attempt > 0:
+                delay = random.uniform(0.1, 0.3) * attempt
+                await asyncio.sleep(delay)
+            
+            # Make async request
+            async with session.get(
+                url, 
+                timeout=aiohttp.ClientTimeout(total=timeout),
+                allow_redirects=True,
+                ssl=False
+            ) as response:
+                
+                # Check content length to avoid downloading massive files
+                content_length = response.headers.get('content-length')
+                if content_length and int(content_length) > 10 * 1024 * 1024:  # 10MB limit
+                    errors.append(f"content_too_large_{content_length}")
+                    return None, errors
+                
+                # Read content with size limit
+                content = ""
+                size = 0
+                max_size = 5 * 1024 * 1024  # 5MB limit
+                
+                async for chunk in response.content.iter_chunked(8192):
+                    if chunk:
+                        chunk_text = chunk.decode('utf-8', errors='ignore')
+                        content += chunk_text
+                        size += len(chunk_text)
+                        if size > max_size:
+                            errors.append("content_size_exceeded")
+                            break
+                
+                # Check for successful response
+                if response.status == 200:
+                    # Validate content type (more permissive)
+                    content_type = response.headers.get('content-type', '').lower()
+                    if any(ct in content_type for ct in ['text/html', 'text/plain', 'application/xhtml', 'text/']):
+                        return content, errors
+                    elif not content_type:  # No content type specified, try anyway
+                        if '<html' in content.lower() or '<!doctype' in content.lower():
+                            return content, errors
+                
+                # Handle redirects manually if needed
+                elif response.status in [301, 302, 303, 307, 308]:
+                    redirect_url = response.headers.get('location')
+                    if redirect_url:
+                        if not redirect_url.startswith('http'):
+                            redirect_url = urljoin(url, redirect_url)
+                        # Avoid infinite redirects
+                        if redirect_url != url:
+                            return await fetch_website_content_async(redirect_url, max_retries=0)
+                
+                # Rate limiting or forbidden
+                elif response.status in [403, 429]:
+                    errors.append(f"http_{response.status}")
+                    if attempt < max_retries:
+                        await asyncio.sleep(random.uniform(0.5, 1.0))
+                        continue
+                
+                else:
+                    errors.append(f"http_{response.status}")
+                    
+        except aiohttp.ClientSSLError:
+            errors.append("ssl_error")
+            # Try HTTP if HTTPS failed
+            if url.startswith('https://'):
+                http_url = url.replace('https://', 'http://')
+                try:
+                    async with session.get(http_url, timeout=aiohttp.ClientTimeout(total=timeout), ssl=False) as response:
+                        if response.status == 200:
+                            content = await response.text()
+                            return content, errors
+                except:
+                    pass
+                    
+        except asyncio.TimeoutError:
+            errors.append("timeout")
+            continue
+            
+        except aiohttp.ClientConnectionError:
+            errors.append("connection_error")
+            continue
+            
+        except Exception as e:
+            errors.append(f"request_error_{type(e).__name__}")
+            continue
+    
+    return None, errors
+
+async def discover_emails_for_domain_async(domain: str, verbose: bool = False) -> Tuple[List[str], str, List[str], Dict[str, int]]:
+    """Async version of domain email discovery with comprehensive parallel processing."""
+    if not domain:
+        return [], "no_domain", [], {}
+    
+    if verbose:
+        print(f"🔍 Starting email discovery for domain: {domain}")
+    
+    # Initialize all variables at function start to avoid UnboundLocalError
+    pages_accessed = []
+    stats = defaultdict(int)
+    all_emails = set()
+    successful_categories = set()
+    found_high_priority_emails = False
+    
+    # Domain variants
+    domain_variants = [domain]
+    if not domain.startswith('www.'):
+        domain_variants.append(f"www.{domain}")
+    
+    # Enhanced URL patterns with French specificity
+    url_patterns = {
+        'main': ['', '/'],
+        'contact_high': ['/contact', '/nous-contacter', '/contactez-nous', '/contact-us'],
+        'contact_medium': ['/contact.html', '/contact.php', '/nous-contacter.html'],
+        'about': ['/about', '/a-propos', '/qui-sommes-nous', '/about-us'],
+        'team': ['/team', '/equipe', '/notre-equipe', '/staff'],
+        'legal': ['/legal', '/mentions-legales', '/politique-confidentialite']
+    }
+    
+    # Async function to test a single URL
+    async def test_url_async(url_info):
+        protocol, domain_variant, path, category = url_info
+        url = f"{protocol}://{domain_variant}{path}"
+        
+        if verbose:
+            print(f"  📡 Testing URL: {url}")
+        
+        try:
+            content, errors = await fetch_website_content_async(url, max_retries=1)
+            if content:
+                emails, extraction_stats = extract_emails_from_html(content, domain)
+                
+                if verbose:
+                    if emails:
+                        print(f"  ✅ Found {len(emails)} emails from {url}: {', '.join(emails[:3])}{'...' if len(emails) > 3 else ''}")
+                    else:
+                        print(f"  ❌ No emails found from {url}")
+                
+                return {
+                    'url': url,
+                    'emails': emails,
+                    'category': category,
+                    'extraction_stats': extraction_stats,
+                    'success': len(emails) > 0,
+                    'errors': errors
+                }
+        except Exception as e:
+            if verbose:
+                print(f"  ⚠️  Error testing {url}: {str(e)}")
+        
+        return {
+            'url': url,
+            'emails': [],
+            'category': category,
+            'extraction_stats': {},
+            'success': False,
+            'errors': ['processing_failed']
+        }
+    
+    # Smart sequential testing with early stopping
+    test_urls = [
+        ('https', domain, '/contact', 'contact_high'),
+        ('https', domain, '/nous-contacter', 'contact_high'),
+        ('https', domain, '', 'main'),
+        ('https', f"www.{domain}", '/contact', 'contact_high'),
+        ('https', f"www.{domain}", '', 'main'),
+        ('http', domain, '', 'main'),
+    ]
+    
+    # Process URLs concurrently with semaphore for rate limiting
+    semaphore = asyncio.Semaphore(5)  # Limit concurrent requests
+    
+    async def test_url_with_semaphore(url_info):
+        async with semaphore:
+            return await test_url_async(url_info)
+    
+    # Test URLs concurrently
+    tasks = [test_url_with_semaphore(url_info) for url_info in test_urls]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # Process results
+    for result in results:
+        if isinstance(result, dict) and result.get('success'):
+            all_emails.update(result['emails'])
+            pages_accessed.append(result['url'])
+            successful_categories.add(result['category'])
+            
+            # Update stats
+            for stat_name, stat_value in result['extraction_stats'].items():
+                stats[stat_name] += stat_value
+    
+    if verbose:
+        print(f"  📊 Discovery summary for {domain}:")
+        print(f"    - Pages accessed: {len(pages_accessed)}")
+        print(f"    - Emails found: {len(all_emails)}")
+        print(f"    - Successful categories: {list(successful_categories)}")
+    
+    # Determine discovery method
+    if 'contact_high' in successful_categories:
+        discovery_method = "contact_page"
+    elif 'main' in successful_categories:
+        discovery_method = "main_page"
+    elif successful_categories:
+        discovery_method = f"other_page_{list(successful_categories)[0]}"
+    else:
+        discovery_method = "no_emails_found"
+    
+    # Clean and validate emails
+    cleaned_emails = clean_extracted_emails(list(all_emails))
+    
+    return cleaned_emails, discovery_method, pages_accessed, dict(stats)
+
+async def process_single_company_worker_async(company_data, verbose=False, start_time=None, monitor=None):
+    """Async version of single company processing with comprehensive monitoring."""
+    processing_start_time = time.time()
+    
+    # Enhanced field extraction
+    name = get_field_value(company_data, ['name', 'company_name', 'raw_name', 'business_name'])
+    website = get_field_value(company_data, ['website', 'domain', 'url', 'website_url', 'site_web'])
+    city = get_field_value(company_data, ['city', 'ville', 'address', 'location', 'adresse']) or ''
+    industry = get_field_value(company_data, ['industry', 'secteur', 'main_category', 'categories', 'category', 'business_type']) or ''
+    
+    # Handle nested address data
+    if not city and company_data.get('detailed_address'):
+        city = company_data['detailed_address'].get('city', '')
+    
+    if verbose and website:
+        print(f"DEBUG: Processing {name} with website: '{website}'")
+
+    # Enhanced domain extraction with debug info
+    domain = clean_url(website) if website else None
+
+    if verbose:
+        if website and not domain:
+            print(f"DEBUG: Failed to extract domain from '{website}' for {name} - likely has UTM parameters")
+        elif domain:
+            print(f"DEBUG: Extracted domain '{domain}' from '{website}' for {name}")
+        elif not website:
+            print(f"DEBUG: {name} has no website field")
+    
+    # Process company
+    if domain:
+        emails, method, pages_accessed, stats = await discover_emails_for_domain_async(domain, verbose)
+        
+        result = {
+            'name': name,
+            'domain': domain,
+            'website': website,
+            'city': city,
+            'industry': industry,
+            'emails_found': emails,
+            'discovery_method': method,
+            'success': len(emails) > 0,
+            'pages_accessed': pages_accessed,
+            'processing_time': time.time() - processing_start_time,
+            'stats': stats
+        }
+        
+        if emails and verbose:
+            current_time = datetime.now().strftime('%H:%M:%S')
+            elapsed = ""
+            if start_time:
+                elapsed_seconds = time.time() - start_time
+                elapsed = f" | Elapsed: {elapsed_seconds/60:.1f}min"
+            print(f"[{current_time}] SUCCESS: {name} -> {', '.join(emails[:3])}{'...' if len(emails) > 3 else ''}{elapsed}")
+        
+    else:
+        result = {
+            'name': name,
+            'domain': None,
+            'website': website,
+            'city': city,
+            'industry': industry,
+            'emails_found': [],
+            'discovery_method': 'no_domain',
+            'success': False,
+            'pages_accessed': [],
+            'processing_time': time.time() - processing_start_time,
+            'stats': {}
+        }
+        
+        if verbose:
+            if not website:
+                print(f"DEBUG: {name} has no website field")
+            else:
+                print(f"DEBUG: {name} website '{website}' resulted in no_domain")
+    
+    # Enhanced monitoring
+    if monitor:
+        processing_time = time.time() - processing_start_time
+        errors = []
+        if 'stats' in result:
+            errors = [key for key, value in result['stats'].items() if key.startswith('error_') and value > 0]
+        
+        monitor.record_company_processing(
+            name, domain, website, processing_time, 
+            result['emails_found'], result['discovery_method'], 
+            result.get('pages_accessed', []), errors  # Use result data
+        )
+    
+    return result
 
 def extract_emails_from_html(html_content: str, domain: str = None) -> Tuple[List[str], Dict[str, int]]:
     """Comprehensive single-pass email extraction with advanced obfuscation detection."""

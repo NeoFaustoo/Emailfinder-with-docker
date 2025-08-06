@@ -45,5 +45,24 @@ emails_only_*.txt
 # Temporary conversion files
 *_converted.ndjson 
 
-uploads/
-data/
+uploads/*
+data/*
+logs/*
+*.log
+*.log.*
+*.log.*.*
+*.log.*.*.*
+*.log.*.*.*.*
+*.log.*.*.*.*.*
+*.log.*.*.*.*.*.*
+*.log.*.*.*.*.*.*.*
+*.json
+*.json.*
+*.json.*.*
+*.json.*.*.*
+*.json.*.*.*.*
+*.json.*.*.*.*.*
+*.json.*.*.*.*.*.*
+*.json.*.*.*.*.*.*.*
+*.json.*.*.*.*.*.*.*.*
+*.json.*.*.*.*.*.*.*.*.*

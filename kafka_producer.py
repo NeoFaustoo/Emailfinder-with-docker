@@ -162,6 +162,6 @@ class AsyncKafkaProducer:
 # Global producer instance
 kafka_producer = AsyncKafkaProducer()
 
-async def get_kafka_producer() -> AsyncKafkaProducer:
+def get_kafka_producer() -> AsyncKafkaProducer:
     """Get the global Kafka producer instance."""
     return kafka_producer 
