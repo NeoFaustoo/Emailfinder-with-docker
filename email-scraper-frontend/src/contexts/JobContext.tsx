@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useReducer, useEffect } from 'react';
 import { JobStatus, ProcessingStats } from '../types/api';
-import apiService from '../services/api';
+import { apiService } from '../services/api';
 import toast from 'react-hot-toast';
 
 interface JobState {
@@ -115,17 +115,41 @@ export function JobProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
-  // Auto-refresh jobs every 5 seconds
+  // Auto-refresh jobs every 5 seconds, pause when tab is hidden to reduce load
   useEffect(() => {
-    fetchJobs();
-    fetchStats();
+    let interval: number | undefined;
 
-    const interval = setInterval(() => {
+    const startPolling = () => {
       fetchJobs();
       fetchStats();
-    }, 5000);
+      interval = window.setInterval(() => {
+        fetchJobs();
+        fetchStats();
+      }, 5000);
+    };
 
-    return () => clearInterval(interval);
+    const stopPolling = () => {
+      if (interval) {
+        window.clearInterval(interval);
+        interval = undefined;
+      }
+    };
+
+    const handleVisibility = () => {
+      if (document.hidden) {
+        stopPolling();
+      } else {
+        startPolling();
+      }
+    };
+
+    startPolling();
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    return () => {
+      stopPolling();
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
   }, []);
 
   const value: JobContextType = {

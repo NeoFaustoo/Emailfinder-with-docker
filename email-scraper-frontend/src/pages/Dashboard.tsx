@@ -2,22 +2,17 @@ import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { 
   Upload, 
-  List, 
-  BarChart3, 
+  List,
+  BarChart3,
   Activity, 
   Mail, 
   Clock, 
   CheckCircle, 
   XCircle,
-  Zap,
-  TrendingUp,
-  Users,
   FileText
 } from 'lucide-react';
 import { useJobs } from '../contexts/JobContext';
-import { ProcessingStats } from '../types/api';
-import apiService from '../services/api';
-import toast from 'react-hot-toast';
+import { apiService } from '../services/api';
 
 const Dashboard: React.FC = () => {
   const { state } = useJobs();
@@ -263,11 +258,11 @@ const Dashboard: React.FC = () => {
               </div>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-sm text-gray-600">Kafka Status</span>
+              <span className="text-sm text-gray-600">Direct Processing</span>
               <div className="flex items-center space-x-2">
-                <div className={`w-2 h-2 rounded-full ${health?.kafka_enabled ? 'bg-success-500' : 'bg-error-500'}`}></div>
+                <div className={`w-2 h-2 rounded-full ${health?.direct_processing ? 'bg-success-500' : 'bg-error-500'}`}></div>
                 <span className="text-sm font-medium text-gray-900">
-                  {health?.kafka_enabled ? 'Connected' : 'Disconnected'}
+                  {health?.direct_processing ? 'Enabled' : 'Disabled'}
                 </span>
               </div>
             </div>

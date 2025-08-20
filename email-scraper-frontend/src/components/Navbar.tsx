@@ -6,8 +6,7 @@ import {
   List, 
   BarChart3, 
   Activity,
-  Mail,
-  Zap
+  Mail
 } from 'lucide-react';
 
 const Navbar: React.FC = () => {

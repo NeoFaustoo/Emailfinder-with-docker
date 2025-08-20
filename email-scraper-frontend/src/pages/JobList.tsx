@@ -1,9 +1,7 @@
 import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { 
-  List, 
   Search, 
-  Filter, 
   SortAsc, 
   SortDesc,
   Clock,
@@ -17,7 +15,6 @@ import {
   Eye
 } from 'lucide-react';
 import { useJobs } from '../contexts/JobContext';
-import { JobStatus } from '../types/api';
 import { formatDistanceToNow } from 'date-fns';
 
 const JobList: React.FC = () => {
@@ -205,7 +202,10 @@ const JobList: React.FC = () => {
                         </span>
                       </div>
                       <p className="text-sm text-gray-500">
-                        {job.files_processed[0]?.split('/').pop() || 'Unknown file'}
+                        {job.job_type === 'folder' 
+                          ? job.folder_name || 'Folder'
+                          : job.files_processed[0]?.split('/').pop() || 'Unknown file'
+                        }
                       </p>
                       <p className="text-xs text-gray-400">
                         Started {formatDistanceToNow(job.start_time * 1000, { addSuffix: true })}
@@ -226,7 +226,7 @@ const JobList: React.FC = () => {
                           <div className="w-24 bg-gray-200 rounded-full h-1">
                             <div
                               className="bg-primary-600 h-1 rounded-full"
-                              style={{ width: `${Math.min(job.progress, 100)}%` }}
+                              style={{ width: `${Math.min(job.progress * 100, 100)}%` }}
                             ></div>
                           </div>
                         </div>

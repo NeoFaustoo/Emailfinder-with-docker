@@ -1,12 +1,14 @@
-export interface JobRequest {
-  file_path: string;
+// API Types for Simplified Email Scraper
+
+export interface ProcessFileRequest {
+  file: File;
   workers: number;
   batch_size: number;
   verbose: boolean;
 }
 
-export interface UploadJobRequest {
-  file: File;
+export interface ProcessFolderRequest {
+  file_path: string;
   workers: number;
   batch_size: number;
   verbose: boolean;
@@ -16,7 +18,7 @@ export interface JobResponse {
   job_id: string;
   status: string;
   message: string;
-  total_files: number;
+  total_files?: number;
 }
 
 export interface JobStatus {
@@ -29,6 +31,9 @@ export interface JobStatus {
   end_time?: number;
   errors: string[];
   files_processed: string[];
+  job_type?: string;
+  folder_name?: string;
+  total_files?: number;
 }
 
 export interface ProcessingStats {
@@ -39,24 +44,32 @@ export interface ProcessingStats {
   total_emails_found: number;
 }
 
+export interface PerformanceOptimizations {
+  enabled: boolean;
+  max_workers: number;
+  semaphore_limits: {
+    domain_discovery: number;
+    batch_processing: number;
+  };
+  connection_pool: {
+    http_sessions: number;
+    aiohttp_connections: number;
+    per_host_limit: number;
+  };
+  memory_monitoring: boolean;
+  circuit_breaker: boolean;
+  dns_caching: boolean;
+}
+
 export interface HealthCheck {
   status: string;
   timestamp: number;
-  kafka_enabled: boolean;
   active_jobs: number;
+  email_scraper_ready: boolean;
+  version: string;
 }
 
-export interface JobResult {
-  job_id: string;
-  status: string;
-  files: Array<{
-    filename: string;
-    path: string;
-    size: number;
-  }>;
-  total_emails: number;
-  total_processed: number;
-}
+// Removed JobResult - no files are saved in in-memory processing
 
 export interface ApiError {
   detail: string;
@@ -73,4 +86,14 @@ export interface JobLogs {
   job_id: string;
   logs: LogEntry[];
   total_count: number;
+}
+
+export interface JobResult {
+  status: string;
+  total_processed: number;
+  total_emails: number;
+  files: Array<{
+    filename: string;
+    size: number;
+  }>;
 } 

@@ -1,6 +1,7 @@
 # Git
 .git
 .gitignore
+backups/
 
 # Python
 __pycache__
@@ -60,3 +61,36 @@ requirements_streaming.txt
 Dockerfile
 docker-compose.yml
 .dockerignore
+logs/
+
+# Node.js (for frontend)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.yarn-integrity
+
+# Build outputs
+build/
+dist/
+*.tgz
+*.tar.gz
+
+# Large files that shouldn't be in context
+kafka_*.py
+*.pyc
+*.pyo
+*.pyd
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+.tmp/
+
+# Scripts that shouldn't be in container
+start-services.sh
+debug-services.sh
+deploy.sh
+TROUBLESHOOTING.md

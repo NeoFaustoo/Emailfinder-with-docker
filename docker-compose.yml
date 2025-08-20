@@ -1,84 +1,57 @@
 
+version: '3.8'
+
 services:
-  zookeeper:
-    image: confluentinc/cp-zookeeper:latest
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-    ports:
-      - "2181:2181"
-    networks:
-      - email-scraper-net
-
-  kafka:
-    image: confluentinc/cp-kafka:7.4.0
-    depends_on: [zookeeper]
-    environment:
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
-    ports:
-      - "9092:9092"
-    networks:
-      - email-scraper-net
-
-  kafka-ui:
-    image: provectuslabs/kafka-ui:latest
-    depends_on: [kafka]
-    ports:
-      - "8080:8080"
-    environment:
-      KAFKA_CLUSTERS_0_NAME: local
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
-      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
-    networks:
-      - email-scraper-net
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    networks:
-      - email-scraper-net
-
+  # Simplified Email Scraper API - Direct Processing
   email-scraper-api:
     build: .
     image: email-scraper-api:latest
+    container_name: email-scraper-api
     ports:
       - "8000:8000"
-    environment:
-      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
-      - REDIS_URL=redis://redis:6379
-    depends_on:
-      - kafka
-      - redis
     volumes:
-      - ./:/app  # Mount entire project directory for direct file access
+      # Persistent storage for uploads and results
+      - ./uploads:/app/uploads
+      - ./data:/app/data
+      - ./results:/app/results
+      - ./logs:/app/logs
     restart: unless-stopped
+    # Performance optimizations for high concurrency scraping
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    deploy:
+      resources:
+        limits:
+          memory: 16G
+          cpus: '8.0'
+        reservations:
+          memory: 8G
+          cpus: '4.0'
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      start_period: 20s
     networks:
       - email-scraper-net
-
-  email-scraper-worker:
-    build: .
-    image: email-scraper-api:latest
-    command: ["python", "multi_worker.py", "300"]
+    # Enhanced logging for debugging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+        tag: "email-scraper-api"
     environment:
-      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
-      - REDIS_URL=redis://redis:6379
-    depends_on:
-      - kafka
-      - redis
-    volumes:
-      - ./:/app  # Mount entire project directory for direct file access
-    restart: unless-stopped
-    networks:
-      - email-scraper-net
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      - LOG_LEVEL=INFO
+      - MAX_WORKERS=300
+      - BATCH_SIZE=200
+      - MEMORY_LIMIT=12G
+      - WORKER_TIMEOUT=300
 
   email-scraper-frontend:
     build: ./email-scraper-frontend
@@ -88,6 +61,8 @@ services:
     depends_on:
       - email-scraper-api
     restart: unless-stopped
+    environment:
+      - NGINX_CLIENT_MAX_BODY_SIZE=1G
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost/health"]
       interval: 30s
@@ -96,6 +71,12 @@ services:
       start_period: 40s
     networks:
       - email-scraper-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+        tag: "email-scraper-frontend"
 
 networks:
   email-scraper-net:

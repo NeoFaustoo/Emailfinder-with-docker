@@ -1,22 +1,37 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
-  BarChart3, 
   TrendingUp, 
   Mail, 
   CheckCircle, 
-  XCircle, 
-  Activity,
   Clock,
-  FileText,
-  Users,
-  Zap
+  Activity,
+  BarChart3,
+  RefreshCw
 } from 'lucide-react';
 import { useJobs } from '../contexts/JobContext';
-import { ProcessingStats } from '../types/api';
 
 const Statistics: React.FC = () => {
-  const { state } = useJobs();
+  const { state, fetchStats } = useJobs();
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const stats = state.stats;
+
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      await fetchStats();
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
+  // Auto-refresh stats every 10 seconds
+  useEffect(() => {
+    const interval = setInterval(() => {
+      fetchStats();
+    }, 10000);
+
+    return () => clearInterval(interval);
+  }, [fetchStats]);
 
   const getStatusDistribution = () => {
     const jobs = state.jobs;
@@ -56,24 +71,82 @@ const Statistics: React.FC = () => {
     return stats.total_emails_found / stats.completed_jobs;
   };
 
+  const getTotalProcessedCompanies = () => {
+    return state.jobs.reduce((total, job) => total + job.total_processed, 0);
+  };
+
+  const getProcessingEfficiency = () => {
+    const totalProcessed = getTotalProcessedCompanies();
+    if (!stats || totalProcessed === 0) return 0;
+    return (stats.total_emails_found / totalProcessed) * 100;
+  };
+
   const statusDistribution = getStatusDistribution();
   const recentActivity = getRecentActivity();
+
+  // Show loading state if no stats are available yet
+  if (!stats && state.loading) {
+    return (
+      <div className="flex items-center justify-center min-h-96">
+        <div className="text-center">
+          <Activity className="h-12 w-12 mx-auto mb-4 text-gray-400 animate-pulse" />
+          <p className="text-gray-600">Loading statistics...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-8">
       {/* Header */}
-      <div className="text-center">
-        <h1 className="text-3xl font-bold text-gray-900 mb-2">
-          Email Scraper Analytics
-        </h1>
-        <p className="text-gray-600">
-          Comprehensive statistics and performance metrics
-        </p>
+      <div className="flex justify-between items-center">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900 mb-2">
+            Email Scraper Analytics
+          </h1>
+          <p className="text-gray-600">
+            Comprehensive statistics and performance metrics
+          </p>
+        </div>
+        <div className="flex items-center space-x-4">
+          <button
+            onClick={handleRefresh}
+            disabled={isRefreshing}
+            className="inline-flex items-center px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 disabled:opacity-50"
+          >
+            <RefreshCw className={`h-4 w-4 mr-2 ${isRefreshing ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
+          {stats && (
+            <div className="flex items-center space-x-2 text-sm text-gray-500">
+              <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+              <span>Live updates • Last: {new Date().toLocaleTimeString()}</span>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Key Metrics */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+        {/* Total Companies Processed */}
+        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200 hover:shadow-md transition-shadow">
+          <div className="flex items-center">
+            <div className="p-2 bg-blue-100 rounded-lg">
+              <BarChart3 className="h-6 w-6 text-blue-600" />
+            </div>
+            <div className="ml-4">
+              <p className="text-sm font-medium text-gray-600">Companies Processed</p>
+              <p className="text-2xl font-bold text-gray-900">
+                {getTotalProcessedCompanies().toLocaleString()}
+              </p>
+              <p className="text-xs text-gray-500 mt-1">
+                {getProcessingEfficiency().toFixed(2)}% email discovery rate
+              </p>
+            </div>
+          </div>
+        </div>
+        {/* Total Emails Found */}
+        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200 hover:shadow-md transition-shadow">
           <div className="flex items-center">
             <div className="p-2 bg-primary-100 rounded-lg">
               <Mail className="h-6 w-6 text-primary-600" />
@@ -81,27 +154,35 @@ const Statistics: React.FC = () => {
             <div className="ml-4">
               <p className="text-sm font-medium text-gray-600">Total Emails Found</p>
               <p className="text-2xl font-bold text-gray-900">
-                {stats?.total_emails_found || 0}
+                {(stats?.total_emails_found || 0).toLocaleString()}
+              </p>
+              <p className="text-xs text-gray-500 mt-1">
+                From {stats?.completed_jobs || 0} completed jobs
               </p>
             </div>
           </div>
         </div>
 
-        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+        {/* Success Rate */}
+        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200 hover:shadow-md transition-shadow">
           <div className="flex items-center">
             <div className="p-2 bg-success-100 rounded-lg">
               <CheckCircle className="h-6 w-6 text-success-600" />
             </div>
             <div className="ml-4">
-              <p className="text-sm font-medium text-gray-600">Success Rate</p>
+              <p className="text-sm font-medium text-gray-600">Job Success Rate</p>
               <p className="text-2xl font-bold text-gray-900">
                 {getSuccessRate().toFixed(1)}%
+              </p>
+              <p className="text-xs text-gray-500 mt-1">
+                {stats?.completed_jobs || 0} of {stats?.total_jobs || 0} jobs
               </p>
             </div>
           </div>
         </div>
 
-        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+        {/* Average Emails per Job */}
+        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200 hover:shadow-md transition-shadow">
           <div className="flex items-center">
             <div className="p-2 bg-warning-100 rounded-lg">
               <TrendingUp className="h-6 w-6 text-warning-600" />
@@ -111,21 +192,8 @@ const Statistics: React.FC = () => {
               <p className="text-2xl font-bold text-gray-900">
                 {getAverageEmailsPerJob().toFixed(1)}
               </p>
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
-          <div className="flex items-center">
-            <div className="p-2 bg-error-100 rounded-lg">
-              <XCircle className="h-6 w-6 text-error-600" />
-            </div>
-            <div className="ml-4">
-              <p className="text-sm font-medium text-gray-600">Failure Rate</p>
-              <p className="text-2xl font-bold text-gray-900">
-                {stats && stats.total_jobs > 0 
-                  ? ((stats.failed_jobs / stats.total_jobs) * 100).toFixed(1)
-                  : 0}%
+              <p className="text-xs text-gray-500 mt-1">
+                Per successful job
               </p>
             </div>
           </div>
@@ -141,29 +209,44 @@ const Statistics: React.FC = () => {
           </div>
           <div className="p-6">
             <div className="space-y-4">
-              {Object.entries(statusDistribution).map(([status, count]) => (
-                <div key={status} className="flex items-center justify-between">
-                  <div className="flex items-center space-x-3">
-                    <div className={`w-3 h-3 rounded-full ${
-                      status === 'completed' ? 'bg-success-500' :
-                      status === 'running' ? 'bg-primary-500' :
-                      status === 'failed' ? 'bg-error-500' :
-                      'bg-warning-500'
-                    }`}></div>
-                    <span className="text-sm font-medium text-gray-900 capitalize">
-                      {status}
-                    </span>
+              {Object.entries(statusDistribution).map(([status, count]) => {
+                const percentage = stats && stats.total_jobs > 0 ? (count / stats.total_jobs) * 100 : 0;
+                return (
+                  <div key={status} className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center space-x-3">
+                        <div className={`w-3 h-3 rounded-full ${
+                          status === 'completed' ? 'bg-success-500' :
+                          status === 'running' ? 'bg-primary-500' :
+                          status === 'failed' ? 'bg-error-500' :
+                          'bg-warning-500'
+                        }`}></div>
+                        <span className="text-sm font-medium text-gray-900 capitalize">
+                          {status}
+                        </span>
+                      </div>
+                      <div className="flex items-center space-x-2">
+                        <span className="text-sm font-bold text-gray-900">{count}</span>
+                        <span className="text-sm text-gray-500">
+                          ({percentage.toFixed(1)}%)
+                        </span>
+                      </div>
+                    </div>
+                    {/* Visual progress bar */}
+                    <div className="w-full bg-gray-200 rounded-full h-2">
+                      <div 
+                        className={`h-2 rounded-full transition-all duration-500 ${
+                          status === 'completed' ? 'bg-success-500' :
+                          status === 'running' ? 'bg-primary-500' :
+                          status === 'failed' ? 'bg-error-500' :
+                          'bg-warning-500'
+                        }`}
+                        style={{ width: `${percentage}%` }}
+                      ></div>
+                    </div>
                   </div>
-                  <div className="flex items-center space-x-2">
-                    <span className="text-sm font-bold text-gray-900">{count}</span>
-                    <span className="text-sm text-gray-500">
-                      ({stats && stats.total_jobs > 0 
-                        ? ((count / stats.total_jobs) * 100).toFixed(1)
-                        : 0}%)
-                    </span>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         </div>
